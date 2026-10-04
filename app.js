@@ -141,6 +141,10 @@ async function init() {
   // 특히 휴대폰에서 홈으로 나가거나 앱을 전환할 때 beforeunload는 잘 안 불리므로 visibilitychange가 핵심
   window.addEventListener('beforeunload', flushSave);
   window.addEventListener('pagehide', flushSave);
+  // PC: 창을 떠나면(다른 창을 누르거나 휴대폰으로 옮겨 가기 전) 모아 둔 변경을 바로 올린다
+  window.addEventListener('blur', () => {
+    if (accessToken && isDirty() && !reloadingForUpdate) syncToDropboxIfDirty().catch(() => {});
+  });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') { flushSave(); return; }
     // 돌아왔을 때: 새 버전이 나왔는지 보고(나왔으면 새 코드로 다시 연다),
@@ -551,6 +555,33 @@ async function dbxDownload(retried, attempt = 0) {
   return res.json();
 }
 
+// 파일 버전 번호(rev)만 묻는다 — 응답이 수백 바이트. 파일이 없으면 null
+async function dbxGetMetadata(retried, attempt = 0) {
+  const res = await fetch('https://api.dropboxapi.com/2/files/get_metadata', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + accessToken,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ path: DROPBOX_FILE }),
+  });
+  if (res.status === 409) return null;
+  if (res.status === 401) {
+    if (!retried && await refreshAccessToken()) {
+      return dbxGetMetadata(true, attempt);
+    }
+    showToast('Dropbox 인증 만료. 다시 로그인해주세요.');
+    logout();
+    throw new Error('auth expired');
+  }
+  if (res.status === 429 && attempt < DBX_MAX_RETRY) {
+    await dbxSleep(dbxRetryDelay(res, attempt));
+    return dbxGetMetadata(retried, attempt + 1);
+  }
+  if (!res.ok) throw new Error('metadata failed: ' + res.status);
+  return res.json();
+}
+
 // ── Backup ──
 // 백업 파일 내용 — 동기화 파일과 같은 항목을 모두 담는다(예전엔 글·폴더만 담아 템플릿·휴지통이 빠졌다)
 function backupPayload() {
@@ -923,6 +954,14 @@ function retireGoneItems(remote) {
 // 합친 결과가 원격과 다르면 '보낼 것 있음'으로, 같으면 '동기화됨'으로 표시한다.
 async function pullAndMerge() {
   lastPullAt = Date.now();
+  // 받기 전에 '바뀌었나'만 먼저 묻는다(Evernote 의 변경 번호와 같은 발상).
+  // 지난번에 받거나 올린 버전 그대로면 다른 기기가 고친 것이 없으므로 0.9MB 파일을 받지 않는다.
+  // 기기에 아무것도 없으면(처음 로그인 등) 묻지 않고 받는다.
+  const rev = getRev();
+  if (rev && !isLocalEmpty()) {
+    const meta = await dbxGetMetadata();
+    if (meta && meta.rev === rev) return false;
+  }
   const remote = await dbxDownload();
   if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
     // 이 앱보다 새 규칙으로 쓰인 파일이면 올리지 않는다(옛 화면이 새 데이터를 망가뜨리지 않게)
@@ -1034,6 +1073,8 @@ async function uploadNow(force, retriedConflict) {
     throw e;
   }
   markSynced(base, seq === changeSeq && !localSaveTimer);
+  lastUploadAt = Date.now();
+  if (isDirty()) pendingSince = lastUploadAt;   // 올리는 동안 또 고쳤으면 그때부터 다시 센다
 }
 
 // 같은 글을 두 기기가 각자 고쳤을 때 늦게 고친 쪽을 본문으로 두고,
@@ -1146,6 +1187,7 @@ function updateSaveSyncTimes() {
 function markSynced(base, clean = true) {
   localStorage.setItem('last_synced_at', String(Date.now()));
   localStorage.setItem('pending_sync', clean ? '0' : '1');
+  if (clean) pendingSince = 0;
   // 원격과 같아진 내용을 다음 합치기의 기준점으로 삼는다
   localStorage.setItem('sync_base', JSON.stringify(base || baseSnapshot(syncableMemos())));
   updateSaveSyncTimes();
@@ -2727,11 +2769,7 @@ async function loadMemoInEditor(memo) {
   cleanupEmptyMemo();
   // 글 전환 시 못 보낸 변경이 있으면 바로 보낸다
   if (localSaveTimer) saveLocalData();
-  if (syncTimer || isDirty()) {
-    clearTimeout(syncTimer);
-    syncTimer = null;
-    syncToDropbox().catch(() => {});
-  }
+  if (syncTimer || isDirty()) syncToDropboxIfDirty().catch(() => {});
   // 온라인이면 최신 데이터를 먼저 받아온 뒤 열기 (방금 받았으면 건너뜀 — 글마다 900KB를 받지 않게)
   syncFailedForCurrentMemo = false;
   if (accessToken && Date.now() - lastPullAt > 30000) {
@@ -2984,19 +3022,46 @@ function saveNow() {
   if (isDirty()) scheduleSyncToDropbox();
 }
 
+// 올리기는 모아서 한다 — 한 번 올릴 때마다 파일 전체(0.9MB)가 나가므로, 쓰다가 잠깐 멈출 때마다 올리지 않는다.
+//  · 손을 10초 놓으면 올린다. 단, 지난번에 올린 뒤 30초는 지나야 한다.
+//  · 쉬지 않고 오래 쓰면(90초 넘게 못 보냄) 쉬지 않아도 올린다.
+//  · 앱을 벗어날 때(flushSave)·다른 글을 열 때·PC 창을 떠날 때·Ctrl+S·동기화 단추는 기다리지 않고 바로 올린다.
+// 기기 안 저장은 지금처럼 바로 하므로, 올리기가 늦어져도 글을 잃지 않는다.
+const SYNC_IDLE_MS = 10000;
+const SYNC_MIN_GAP_MS = 30000;
+const SYNC_MAX_WAIT_MS = 90000;
 let syncTimer = null;
+let lastUploadAt = 0;     // 마지막으로 올린 시각
+let pendingSince = 0;     // 아직 못 보낸 변경이 처음 생긴 시각
 function scheduleSyncToDropbox() {
   if (!accessToken) return;
+  const now = Date.now();
+  if (!pendingSince) pendingSince = now;
+  const readyAt = now - pendingSince >= SYNC_MAX_WAIT_MS ? now : now + SYNC_IDLE_MS;
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(async () => {
-    setSyncStatus('syncing', '저장 중...');
-    try {
-      await syncToDropbox();
-      setSyncStatus('synced', '저장 완료');
-    } catch {
-      setSyncStatus('error', '저장 실패');
-    }
-  }, 1000);
+  syncTimer = setTimeout(runScheduledSync, Math.max(readyAt, lastUploadAt + SYNC_MIN_GAP_MS) - now);
+}
+
+async function runScheduledSync() {
+  syncTimer = null;
+  // 그사이 다른 길로 방금 올렸으면 간격을 채울 때까지 다시 기다린다
+  const wait = lastUploadAt + SYNC_MIN_GAP_MS - Date.now();
+  if (wait > 0) { syncTimer = setTimeout(runScheduledSync, wait); return; }
+  setSyncStatus('syncing', '저장 중...');
+  try {
+    await syncToDropboxIfDirty();
+    setSyncStatus('synced', '저장 완료');
+  } catch {
+    setSyncStatus('error', '저장 실패');
+  }
+}
+
+// 지금 바로 올리되, 차례가 왔을 때 보낼 것이 남아 있을 때만 (앞서 줄 선 올리기가 이미 보냈으면 또 보내지 않는다)
+function syncToDropboxIfDirty() {
+  if (!accessToken) return Promise.resolve();
+  clearTimeout(syncTimer);
+  syncTimer = null;
+  return queueSync(() => (isDirty() ? uploadNow() : undefined));
 }
 
 // 앱을 닫거나 다른 화면으로 넘어갈 때: 현재 내용을 즉시 기기에 저장 + 대기 중인 클라우드 전송을 바로 실행
@@ -3018,9 +3083,7 @@ function flushSave() {
   // 아직 못 보낸 변경이 있으면 기다리지 않고 지금 바로 보낸다.
   // (예전에는 '대기 중인 전송'이 있을 때만 보내서, 타이핑 1.5초 안에 앱을 벗어나면 아무것도 안 갔다)
   // 새 버전으로 다시 여는 중이면 올리지 않는다 — 새 코드가 열리자마자 이어서 올린다
-  clearTimeout(syncTimer);
-  syncTimer = null;
-  if (accessToken && isDirty() && !reloadingForUpdate) syncToDropbox().catch(() => {});
+  if (accessToken && isDirty() && !reloadingForUpdate) syncToDropboxIfDirty().catch(() => {});
 }
 
 // ── Viewer Mode ──
