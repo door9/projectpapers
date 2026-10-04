@@ -366,6 +366,24 @@ html, body {
 .folder-item--child {
   padding-left: 32px;
 }
+.folder-item--grand {
+  padding-left: 50px;
+}
+/* 휴면 폴더 목록 안의 묶음 이름표(휴면 메모) */
+.folder-dormant-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 14px 3px;
+  font-size: 0.7rem;
+  color: var(--text2);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.folder-dormant-group span { overflow: hidden; text-overflow: ellipsis; }
+.folder-dormant-group .ico { width: 1.1em; height: 1.1em; flex-shrink: 0; }
 
 .folder-dormant-toggle {
   display: flex;
@@ -476,7 +494,9 @@ html, body {
   border-bottom: 1px solid var(--border);
   background: var(--bg);
 }
+.fm-selbar { flex-wrap: wrap; }
 .fm-sel-n { margin-right: auto; font-size: 0.92rem; font-weight: 600; white-space: nowrap; }
+.fm-sel-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-left: auto; }
 .fm-sel-btn {
   display: inline-flex;
   align-items: center;
@@ -498,7 +518,8 @@ html, body {
 .fm-sel-btn.danger { color: var(--accent); border-color: var(--accent); }
 /* 좁은 휴대폰: 단추 셋이 한 줄에 들어가게 아이콘을 빼고 좁힌다 */
 @media (max-width: 420px) {
-  .fm-selbar { gap: 4px; padding-right: 10px; }
+  .fm-selbar, .fm-sel-actions { gap: 4px; }
+  .fm-selbar { padding-right: 10px; }
   .fm-sel-btn { padding: 0 10px; }
   .fm-sel-btn .ico { display: none; }
 }
@@ -538,7 +559,8 @@ html, body {
 .fm-row:hover, .fm-row.menu-open { background: var(--bg); }
 .fm-row.selected { background: #f9e4ea; }
 /* 체크박스는 한 줄로 맞추고, 하위 폴더는 손잡이부터 들여 쓴다 */
-.fm-row.fm-child .fm-grip { margin-left: 28px; }
+.fm-row.fm-d2 .fm-grip { margin-left: 28px; }
+.fm-row.fm-d3 .fm-grip { margin-left: 56px; }
 .fm-check {
   width: 32px;
   height: 36px;
@@ -592,6 +614,26 @@ html, body {
   color: var(--text);
   font: inherit;
 }
+/* 휴면 묶음: 휴면 메모가 같은 폴더끼리 */
+.fm-group + .fm-group { margin-top: 6px; }
+.fm-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  margin: 2px 6px 0;
+  padding: 0 10px 0 12px;
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 0.8rem;
+  color: var(--text);
+}
+.fm-group-head > .ico { width: 15px; height: 15px; color: var(--text2); }
+.fm-group-note { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fm-group-note.empty { font-weight: 400; color: var(--text2); }
+.fm-group-meta { flex-shrink: 0; font-size: 0.72rem; color: var(--text2); white-space: nowrap; }
+.fm-group-head .fm-more { width: 30px; height: 30px; }
+.fm-group-head.menu-open { background: var(--bg2); }
 .fm-empty {
   margin: 4px 16px 6px;
   padding: 14px;
@@ -811,6 +853,7 @@ body.fm-drag-on, body.fm-drag-on * { cursor: grabbing !important; user-select: n
 .folder-select-item:hover { background: var(--bg); }
 .folder-select-item.active { background: var(--bg2); color: var(--accent); font-weight: 600; }
 .folder-select-item--child { padding-left: 28px; }
+.folder-select-item--grand { padding-left: 44px; }
 
 /* Template */
 #template-wrap {

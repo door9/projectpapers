@@ -748,7 +748,7 @@ function sameAsRemote(remote) {
   if (!remote || Array.isArray(remote)) return false;
   const key = (arr, f) => JSON.stringify((arr || []).map(f).sort());
   const mk = (m) => m.id + ':' + m.updatedAt + ':' + (m.metaAt || 0);
-  const fk = (f) => [f.id, f.name, f.parentId || '', f.sortOrder, f.updatedAt || 0, f.password || '', f.dormant ? 1 : 0].join('|');
+  const fk = (f) => [f.id, f.name, f.parentId || '', f.sortOrder, f.updatedAt || 0, f.password || '', f.dormant ? 1 : 0, f.dormantNote || ''].join('|');
   const tk = (t) => t.type + ':' + (t.data && t.data.id);
   const dk = (d) => d.id || d;
   return key(syncableMemos(), mk) === key(remote.memos, mk)
@@ -1192,6 +1192,68 @@ function getChildFolders(parentId) {
   return folders.filter((f) => f.parentId === parentId).sort(sortBySortOrder);
 }
 
+// ── 폴더 계층: 최상위 → 하위 → 그 하위, 3단계까지 ──
+const MAX_FOLDER_DEPTH = 3;
+
+// 아래로 딸린 폴더 전부(자식·손자). 자료가 꼬여 고리가 생겨도 멈추게 본 것은 다시 보지 않는다
+function getDescendantIds(id) {
+  const out = new Set();
+  const walk = (pid) => {
+    for (const c of folders) if (c.parentId === pid && c.id !== id && !out.has(c.id)) { out.add(c.id); walk(c.id); }
+  };
+  walk(id);
+  return [...out];
+}
+
+// 최상위 = 1. 부모가 사라진 폴더는 거기서 끊어 센다
+function folderDepth(id) {
+  let d = 0;
+  const seen = new Set();
+  let f = folders.find((x) => x.id === id);
+  while (f && !seen.has(f.id)) {
+    seen.add(f.id);
+    d++;
+    f = f.parentId ? folders.find((x) => x.id === f.parentId) : null;
+  }
+  return d;
+}
+
+// 이 폴더부터 맨 아래까지 몇 단계인가 (하위가 없으면 1)
+function subtreeHeight(id, seen = new Set()) {
+  if (seen.has(id)) return 0;
+  seen.add(id);
+  const kids = folders.filter((c) => c.parentId === id);
+  return 1 + (kids.length ? Math.max(...kids.map((k) => subtreeHeight(k.id, seen))) : 0);
+}
+
+// id 폴더(딸린 폴더 포함)를 parentId 아래로 넣을 수 있나 — 자기·자기 하위 안으로는 못 넣고, 합쳐서 3단계를 넘으면 안 된다
+function canMoveFolderUnder(id, parentId) {
+  if (!parentId) return true;
+  if (parentId === id || !folders.some((f) => f.id === parentId)) return false;
+  if (getDescendantIds(id).includes(parentId)) return false;
+  return folderDepth(parentId) + subtreeHeight(id) <= MAX_FOLDER_DEPTH;
+}
+
+// 최상위 폴더 — 사용 중 먼저, 휴면은 뒤
+function topFoldersInOrder() {
+  const tops = folders.filter((f) => !f.parentId);
+  return [...tops.filter((f) => !f.dormant).sort(sortBySortOrder), ...tops.filter((f) => f.dormant).sort(sortBySortOrder)];
+}
+
+// 목록용: 주어진 최상위 폴더들부터 깊이 우선으로 [{ f, depth }]
+function folderTree(tops) {
+  const out = [];
+  const seen = new Set();
+  const walk = (f, depth) => {
+    if (seen.has(f.id)) return;
+    seen.add(f.id);
+    out.push({ f, depth });
+    if (depth < MAX_FOLDER_DEPTH) getChildFolders(f.id).forEach((c) => walk(c, depth + 1));
+  };
+  tops.forEach((t) => walk(t, 1));
+  return out;
+}
+
 function nextSortOrder(parentId) {
   const siblings = folders.filter((f) => (f.parentId || null) === (parentId || null));
   return siblings.length === 0 ? 0 : Math.max(...siblings.map((f) => f.sortOrder ?? 0)) + 1;
@@ -1201,36 +1263,19 @@ function isVisibleMemo(m) {
   return m.title.trim() || m.content.trim();
 }
 
+// 이 폴더와 아래 폴더(손자까지)의 글 수
 function getFolderMemoCount(folderId) {
-  const childIds = getChildFolders(folderId).map((f) => f.id);
-  return memos.filter((m) => (m.folder === folderId || childIds.includes(m.folder)) && isVisibleMemo(m)).length;
+  const ids = new Set([folderId, ...getDescendantIds(folderId)]);
+  return memos.filter((m) => ids.has(m.folder) && isVisibleMemo(m)).length;
 }
 
+// 휴면 폴더 + 그 아래 폴더 전부(손자까지)
 function getDormantFolderIds() {
   const ids = new Set();
   for (const f of folders) {
-    if (f.dormant) {
-      ids.add(f.id);
-      getChildFolders(f.id).forEach((c) => ids.add(c.id));
-    }
-    // 부모가 휴면이면 자식도 휴면
-    if (f.parentId) {
-      const parent = folders.find((p) => p.id === f.parentId);
-      if (parent && parent.dormant) ids.add(f.id);
-    }
+    if (f.dormant) { ids.add(f.id); getDescendantIds(f.id).forEach((c) => ids.add(c)); }
   }
   return ids;
-}
-
-function toggleDormant(folderId) {
-  const f = folders.find((x) => x.id === folderId);
-  if (!f) return;
-  f.dormant = !f.dormant;
-  f.updatedAt = Date.now();
-  saveLocalData();
-  renderAll();
-  scheduleSyncToDropbox();
-  showToast(f.dormant ? '휴면 처리되었습니다' : '휴면이 해제되었습니다');
 }
 
 // ── Folder Password ──
@@ -1478,11 +1523,11 @@ function showFolderDialog() {
   const create = () => {
     const name = input.value.trim();
     if (name) {
-      // 현재 폴더가 최상위 폴더이면 하위 폴더로 생성, 아니면 최상위로
+      // 지금 연 폴더 안에 만든다(3단계까지). 이미 3단계면 그 옆(같은 부모 아래)에
       let parentId = null;
       if (currentFolder && currentFolder !== '__none__') {
         const cur = folders.find((f) => f.id === currentFolder);
-        if (cur && !cur.parentId) parentId = cur.id; // 최상위 폴더 아래에만 하위 생성
+        if (cur) parentId = folderDepth(cur.id) < MAX_FOLDER_DEPTH ? cur.id : (cur.parentId || null);
       }
       folders.push({ id: crypto.randomUUID(), name, parentId, sortOrder: nextSortOrder(parentId), updatedAt: Date.now() });
       saveLocalData();
@@ -1498,59 +1543,17 @@ function showFolderDialog() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 }
 
-function showMoveFolderDialog(id) {
-  const folder = folders.find((f) => f.id === id);
-  if (!folder) return;
-  // 이동 가능한 대상: 최상위로 + 자기 자신과 자기 하위 폴더를 제외한 최상위 폴더
-  const childIds = getChildFolders(id).map((f) => f.id);
-  // 하위 폴더를 가진 폴더를 다른 폴더 아래로 넣으면 3단계가 되어 목록에서 보이지 않는다 → 최상위로만
-  const topFolders = childIds.length ? [] : folders.filter((f) => !f.parentId && f.id !== id && !childIds.includes(f.id)).sort(sortBySortOrder);
-
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  let optionsHtml = `<option value="">-- 최상위 --</option>`;
-  for (const f of topFolders) {
-    const selected = folder.parentId === f.id ? ' selected' : '';
-    optionsHtml += `<option value="${f.id}"${selected}>${escapeHtml(f.name)}</option>`;
-  }
-  overlay.innerHTML = `
-    <div class="modal-box">
-      <p>"${escapeHtml(folder.name)}" 폴더를 이동</p>
-      <select id="move-folder-select" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.9rem;outline:none;margin-bottom:16px;">
-        ${optionsHtml}
-      </select>
-      <button class="btn btn-secondary" id="movef-cancel">취소</button>
-      <button class="btn btn-primary" id="movef-ok">이동</button>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  overlay.querySelector('#movef-cancel').onclick = () => overlay.remove();
-  overlay.querySelector('#movef-ok').onclick = () => {
-    const newParent = overlay.querySelector('#move-folder-select').value || null;
-    overlay.remove();
-    if (newParent === (folder.parentId || null)) return;   // 그대로 두기를 골랐으면 순서도 건드리지 않는다
-    // 하위로 들어가면 휴면이 풀린다(부모를 따른다). 최상위로 나오면 지금 칸(사용 중/휴면) 맨 끝으로
-    const plan = planFolderMove(id, { parentId: newParent, dormant: !newParent && !!folder.dormant });
-    if (!plan) return;
-    applyFolderMove(plan);
-    showToast('폴더가 이동되었습니다');
-  };
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-}
-
 function confirmDeleteFolder(id) {
   confirmDeleteFolders([id]);
 }
 
-// 여러 폴더를 한꺼번에 지운다(2번 확인). 부모와 하위를 같이 골랐으면 하위는 부모와 함께 지워지므로 따로 세지 않는다
+// 여러 폴더를 한꺼번에 지운다(2번 확인). 위아래 폴더를 같이 골랐으면 아래 것은 위 것과 함께 지워지므로 따로 세지 않는다
 function confirmDeleteFolders(ids, onDone) {
   const picked = ids.map((id) => folders.find((f) => f.id === id)).filter(Boolean);
-  const pickedIds = new Set(picked.map((f) => f.id));
-  const roots = picked.filter((f) => !(f.parentId && pickedIds.has(f.parentId)));
+  const roots = picked.filter((f) => !picked.some((p) => p.id !== f.id && getDescendantIds(p.id).includes(f.id)));
   if (!roots.length) return;
   const allIds = new Set();
-  roots.forEach((f) => { allIds.add(f.id); getChildFolders(f.id).forEach((c) => allIds.add(c.id)); });
+  roots.forEach((f) => { allIds.add(f.id); getDescendantIds(f.id).forEach((c) => allIds.add(c)); });
   const childCount = allIds.size - roots.length;
   const memoCount = memos.filter((m) => allIds.has(m.folder)).length;
   const label = roots.length === 1 ? `"${escapeHtml(roots[0].name)}" 폴더` : `${roots.length}개 폴더`;
@@ -1582,27 +1585,9 @@ function confirmDeleteFolders(ids, onDone) {
   };
 }
 
-// 여러 최상위 폴더를 한꺼번에 휴면 처리/해제 (하위 폴더는 부모를 따르므로 건너뛴다)
-function setFoldersDormant(ids, on) {
-  const now = Date.now();
-  let n = 0;
-  for (const id of ids) {
-    const f = folders.find((x) => x.id === id);
-    if (!f || f.parentId || !!f.dormant === on) continue;
-    f.dormant = on;
-    f.updatedAt = now;
-    n++;
-  }
-  if (!n) return;
-  saveLocalData();
-  renderAll();
-  scheduleSyncToDropbox();
-  showToast(n + '개 폴더' + (on ? '가 휴면 처리되었습니다' : '의 휴면이 해제되었습니다'));
-}
-
 function deleteFolder(id) {
   const folder = folders.find((f) => f.id === id);
-  const childFolders = getChildFolders(id);
+  const childFolders = getDescendantIds(id).map((cid) => folders.find((f) => f.id === cid)).filter(Boolean);
   const allIds = [id, ...childFolders.map((f) => f.id)];
   // 폴더 + 하위 폴더 내 메모들을 휴지통으로 이동
   const folderMemos = memos.filter((m) => allIds.includes(m.folder));
@@ -1631,18 +1616,19 @@ function deleteFolder(id) {
 }
 
 // ── 폴더 옮기기 (순서·상위 폴더·휴면 칸) ──
-// target = { parentId, dormant, beforeId } — beforeId 앞에 넣는다(없으면 그 칸 맨 끝).
+// target = { parentId, dormant, beforeId, note } — beforeId 앞에 넣는다(없으면 그 칸·묶음 맨 끝).
+// note: 휴면 칸에 넣을 때 들어갈 휴면 묶음(휴면 메모). 생략하면 지금 메모를 그대로 둔다.
 // 최상위는 [사용 중 …, 휴면 …]을 한 줄로 보고 번호를 다시 매긴다. 실제로 자리가 바뀌는지(moved)도 함께 돌려준다.
-function planFolderMove(id, { parentId = null, dormant = false, beforeId = null } = {}) {
+function planFolderMove(id, { parentId = null, dormant = false, beforeId = null, note } = {}) {
   const f = folders.find((x) => x.id === id);
-  if (!f || parentId === id) return null;
+  if (!f) return null;
   if (parentId) {
-    const p = folders.find((x) => x.id === parentId);
-    if (!p || p.parentId) return null;                      // 2단계까지만
-    if (folders.some((c) => c.parentId === id)) return null; // 하위 폴더가 있는 폴더는 최상위로만
+    if (!canMoveFolderUnder(id, parentId)) return null;     // 자기 안으로·3단계 넘게는 못 들어간다
     dormant = false;                                         // 하위 폴더는 부모의 휴면을 따른다
   }
   dormant = !!dormant;
+  const curNote = f.dormantNote || '';
+  const newNote = !dormant ? '' : note !== undefined ? note : (f.dormant && !f.parentId ? curNote : '');
   const group = folders.filter((x) => (x.parentId || null) === parentId);
   const before = parentId
     ? group.sort(sortBySortOrder)
@@ -1651,29 +1637,217 @@ function planFolderMove(id, { parentId = null, dormant = false, beforeId = null 
   if (beforeId === id) { const i = before.findIndex((x) => x.id === id); beforeId = before[i + 1] ? before[i + 1].id : null; }
   const list = before.filter((x) => x.id !== id);
   let idx = beforeId ? list.findIndex((x) => x.id === beforeId) : -1;
-  if (idx < 0) idx = (parentId || dormant) ? list.length : list.filter((x) => !x.dormant).length;
+  if (idx < 0) {
+    if (parentId) idx = list.length;
+    else if (!dormant) idx = list.filter((x) => !x.dormant).length;
+    else {
+      // 휴면 묶음 맨 끝 = 같은 메모를 단 마지막 폴더 바로 뒤
+      let last = -1;
+      list.forEach((x, i) => { if (x.dormant && (x.dormantNote || '') === newNote) last = i; });
+      idx = last >= 0 ? last + 1 : list.length;
+    }
+  }
   list.splice(idx, 0, f);
-  const moved = (f.parentId || null) !== parentId || !!f.dormant !== dormant ||
+  const moved = (f.parentId || null) !== parentId || !!f.dormant !== dormant || (dormant && curNote !== newNote) ||
     before.map((x) => x.id).join() !== list.map((x) => x.id).join();
-  return { f, parentId, dormant, list, moved };
+  return { f, parentId, dormant, note: newNote, list, moved };
 }
 
-function applyFolderMove(plan) {
-  const { f, parentId, dormant, list } = plan;
+// quiet: 여러 개를 연달아 옮길 때 — 저장·다시 그리기는 부른 쪽에서 한 번만
+function applyFolderMove(plan, quiet) {
+  const { f, parentId, dormant, note, list } = plan;
   const now = Date.now();
   if ((f.parentId || null) !== parentId) f.parentId = parentId;
-  if (!!f.dormant !== dormant) f.dormant = dormant;
+  if (dormant) {
+    if (!f.dormant) { f.dormant = true; f.dormantAt = now; }
+    if (note) f.dormantNote = note; else delete f.dormantNote;
+  } else if (f.dormant || f.dormantNote || f.dormantAt) {
+    f.dormant = false;
+    delete f.dormantNote;
+    delete f.dormantAt;
+  }
   f.updatedAt = now;
   list.forEach((x, i) => { if (x.sortOrder !== i) { x.sortOrder = i; x.updatedAt = now; } });
+  if (quiet) return;
   saveLocalData();
   renderAll();
   scheduleSyncToDropbox();
 }
 
+// 폴더 옮기기 대화상자 — 하나든 여럿이든. 고른 폴더의 하위까지 같이 골랐으면 하위는 부모와 함께 따라간다
+function showMoveFoldersDialog(ids, onDone) {
+  const picked = ids.map((id) => folders.find((f) => f.id === id)).filter(Boolean);
+  const order = new Map(folderTree(topFoldersInOrder()).map(({ f }, i) => [f.id, i]));
+  const roots = picked
+    .filter((f) => !picked.some((p) => p.id !== f.id && getDescendantIds(p.id).includes(f.id)))
+    .sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9));
+  if (!roots.length) return;
+  const blocked = new Set();
+  roots.forEach((r) => { blocked.add(r.id); getDescendantIds(r.id).forEach((c) => blocked.add(c)); });
+  const single = roots.length === 1 ? roots[0] : null;
+  let anyDisabled = false;
+  let opts = `<option value=""${single && !single.parentId ? ' selected' : ''}>-- 최상위 --</option>`;
+  for (const { f, depth } of folderTree(topFoldersInOrder())) {
+    if (blocked.has(f.id)) continue;
+    const ok = roots.every((r) => canMoveFolderUnder(r.id, f.id));
+    if (!ok) anyDisabled = true;
+    const pad = '　'.repeat(depth - 1) + (depth > 1 ? '└ ' : '');
+    opts += `<option value="${f.id}"${ok ? '' : ' disabled'}${single && single.parentId === f.id ? ' selected' : ''}>${pad}${escapeHtml(f.name)}${f.dormant ? ' (휴면)' : ''}</option>`;
+  }
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <p>${single ? `"${escapeHtml(single.name)}" 폴더를 옮길 곳` : `${roots.length}개 폴더를 옮길 곳`}</p>
+      <select id="move-folder-select" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.9rem;outline:none;margin-bottom:${anyDisabled ? 6 : 16}px;">
+        ${opts}
+      </select>
+      ${anyDisabled ? '<p style="font-size:0.75rem;color:var(--text2);margin-bottom:14px">흐린 폴더는 3단계를 넘어 들어갈 수 없습니다</p>' : ''}
+      <button class="btn btn-secondary" id="movef-cancel">취소</button>
+      <button class="btn btn-primary" id="movef-ok">옮기기</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#movef-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#movef-ok').onclick = () => {
+    const target = overlay.querySelector('#move-folder-select').value || null;
+    overlay.remove();
+    let n = 0;
+    for (const r of roots) {
+      if ((r.parentId || null) === target) continue;   // 이미 거기 있으면 순서도 건드리지 않는다
+      const plan = planFolderMove(r.id, { parentId: target, dormant: false });
+      if (!plan || !plan.moved) continue;
+      applyFolderMove(plan, true);
+      n++;
+    }
+    if (n) {
+      saveLocalData();
+      renderAll();
+      scheduleSyncToDropbox();
+      showToast(single ? '폴더가 이동되었습니다' : n + '개 폴더를 옮겼습니다');
+    }
+    if (onDone) onDone();
+  };
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+}
+
+// ── 휴면 ──
+// 휴면은 최상위 폴더에 건다. 그 아래 폴더·글은 모두 따라서 '전체'에서 숨는다.
+// 휴면 메모(dormantNote) = '어느 부서·팀, 언제' 같은 한 줄. 같은 메모를 단 폴더끼리 휴면 칸에서 한 묶음으로 보인다.
+function setFoldersDormant(ids, on, note = '') {
+  const now = Date.now();
+  note = (note || '').trim();
+  let n = 0;
+  for (const id of ids) {
+    const f = folders.find((x) => x.id === id);
+    if (!f || f.parentId || !!f.dormant === on) continue;
+    if (on) {
+      f.dormant = true;
+      f.dormantAt = now;
+      if (note) f.dormantNote = note; else delete f.dormantNote;
+    } else {
+      f.dormant = false;
+      delete f.dormantNote;
+      delete f.dormantAt;
+    }
+    f.updatedAt = now;
+    n++;
+  }
+  if (!n) return;
+  saveLocalData();
+  renderAll();
+  scheduleSyncToDropbox();
+  showToast((n > 1 ? n + '개 폴더' : '폴더') + (on ? '가 휴면 처리되었습니다' : '의 휴면이 해제되었습니다'));
+}
+
+function setDormantNote(ids, note) {
+  note = (note || '').trim();
+  const now = Date.now();
+  let n = 0;
+  for (const id of ids) {
+    const f = folders.find((x) => x.id === id);
+    if (!f || f.parentId || !f.dormant || (f.dormantNote || '') === note) continue;
+    if (note) f.dormantNote = note; else delete f.dormantNote;
+    f.updatedAt = now;
+    n++;
+  }
+  if (!n) return;
+  saveLocalData();
+  renderAll();
+  scheduleSyncToDropbox();
+  showToast('휴면 메모를 저장했습니다');
+}
+
+// mode 'sleep': 휴면 처리(메모 입력) / 'note': 이미 휴면인 폴더들의 메모 고치기
+function showDormantDialog(ids, { mode = 'sleep', note = '', onDone } = {}) {
+  let tops = ids.map((id) => folders.find((f) => f.id === id)).filter((f) => f && !f.parentId);
+  tops = tops.filter((f) => (mode === 'sleep' ? !f.dormant : f.dormant));
+  if (!tops.length) return;
+  let title = '휴면 메모';
+  let info = '';
+  if (mode === 'sleep') {
+    const all = new Set();
+    tops.forEach((f) => { all.add(f.id); getDescendantIds(f.id).forEach((c) => all.add(c)); });
+    const sub = all.size - tops.length;
+    const memoN = memos.filter((m) => all.has(m.folder) && isVisibleMemo(m)).length;
+    title = tops.length === 1 ? `"${escapeHtml(tops[0].name)}" 휴면 처리` : `${tops.length}개 폴더 휴면 처리`;
+    info = (sub ? `하위 폴더 ${sub}개와 ` : '') + `메모 ${memoN}개가 함께 휴면에 들어갑니다`;
+  }
+  const notes = [...new Set(folders.filter((f) => f.dormant && f.dormantNote).map((f) => f.dormantNote))];
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <p>${title}</p>
+      ${info ? `<p style="font-size:0.85rem;color:var(--text2);margin-top:-8px">${info}</p>` : ''}
+      <input type="text" id="dn-input" list="dn-list" maxlength="80" autocomplete="off"
+        placeholder="휴면 메모 (예: 사회부 기동팀, 2024.10–2025.10)" value="${escapeHtml(note)}">
+      <datalist id="dn-list">${notes.map((n) => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
+      <div>
+        <button class="btn btn-secondary" id="dn-cancel">취소</button>
+        <button class="btn btn-primary" id="dn-ok">${mode === 'sleep' ? '휴면 처리' : '저장'}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector('#dn-input');
+  input.focus();
+  input.select();
+  const ok = () => {
+    const v = input.value;
+    overlay.remove();
+    if (mode === 'sleep') setFoldersDormant(tops.map((f) => f.id), true, v);
+    else setDormantNote(tops.map((f) => f.id), v);
+    if (onDone) onDone();
+  };
+  overlay.querySelector('#dn-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#dn-ok').onclick = ok;
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); ok(); } });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+}
+
+// 휴면 묶음: 휴면 메모가 같은 최상위 휴면 폴더끼리. 최근에 휴면한 묶음이 위, 메모 없는 묶음은 맨 아래
+function dormantGroups() {
+  const map = new Map();
+  for (const f of folders.filter((x) => !x.parentId && x.dormant).sort(sortBySortOrder)) {
+    const note = f.dormantNote || '';
+    if (!map.has(note)) map.set(note, { note, tops: [], at: 0 });
+    const g = map.get(note);
+    g.tops.push(f);
+    g.at = Math.max(g.at, f.dormantAt || 0);
+  }
+  return [...map.values()].sort((a, b) => (!a.note - !b.note) || b.at - a.at);
+}
+
+function formatDay(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // ── 폴더 관리 화면 (크롬 북마크 관리자처럼 한 화면에서) ──
 // 사이드바 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'로 연다.
 // 줄 끝 ⋮ 하나에 모든 기능: 열기·이름 바꾸기·하위 폴더·옮기기·비밀번호·휴면(최상위만)·삭제.
-// 왼쪽 손잡이를 끌어 순서를 바꾸고, 다른 폴더 위에 놓으면 그 하위로, 휴면 칸에 놓으면 휴면이 된다.
+// 체크박스로 여럿을 골라 한꺼번에 옮기기·휴면·삭제. 폴더는 3단계까지.
+// 왼쪽 손잡이를 끌어 순서를 바꾸고, 다른 폴더 위에 놓으면 그 하위로, 휴면 묶음에 놓으면 그 묶음으로 휴면.
 let fm = null;   // 열려 있을 때 { el, body, editing, creating, menu, drag, openedAt, selected(체크한 id), lastCheck }
 
 function openFolderManager(focusId) {
@@ -1690,9 +1864,10 @@ function openFolderManager(focusId) {
       </div>
       <div class="fm-selbar" id="fm-selbar" hidden></div>
       <div class="fm-tip" id="fm-tip" hidden>
-        왼쪽 손잡이(${ico('grip')})를 끌어 순서 바꾸기 · 다른 폴더 위에 놓으면 그 하위로 · 휴면 칸에 놓으면 휴면<br>
-        체크박스로 여러 폴더를 골라 한꺼번에 휴면·삭제 · PC는 Shift+클릭으로 범위 선택<br>
-        이름은 두 번 클릭해 바로 고칠 수 있어요 · 휴면 폴더의 글은 '전체'에서 숨겨집니다
+        왼쪽 손잡이(${ico('grip')})를 끌어 순서 바꾸기 · 다른 폴더 위에 놓으면 그 하위로(3단계까지) · 휴면 묶음에 놓으면 그 묶음으로 휴면<br>
+        체크박스로 여러 폴더를 골라 한꺼번에 옮기기·휴면·삭제 · PC는 Shift+클릭으로 범위 선택<br>
+        휴면은 최상위 폴더에 걸고, 아래 폴더와 글은 함께 '전체'에서 숨겨집니다 · 휴면 메모가 같은 폴더끼리 한 묶음<br>
+        이름은 두 번 클릭해 바로 고칠 수 있어요
       </div>
       <div class="fm-body" id="fm-body"></div>
     </div>`;
@@ -1705,7 +1880,7 @@ function openFolderManager(focusId) {
   el.querySelector('#fm-selbar').addEventListener('click', onFmSelbarClick);
   // 바깥(어두운 부분) 누르면 닫기 — PC 에서만 보인다
   el.addEventListener('click', (e) => {
-    if (fm && fm.menu && !e.target.closest('.fm-menu') && !e.target.closest('[data-act="menu"]')) closeFmMenu();
+    if (fm && fm.menu && !e.target.closest('.fm-menu') && !e.target.closest('[data-act]')) closeFmMenu();
     if (e.target === el) closeFolderManager();
   });
   fm.body.addEventListener('click', onFmBodyClick);
@@ -1747,30 +1922,24 @@ function onFmKeydown(e) {
   closeFolderManager();
 }
 
-// 화면 순서: 칸(사용 중/휴면)마다 최상위 → 그 하위. 어디에도 안 걸리는 폴더(부모가 사라졌거나 3단계)는
-// 사이드바엔 안 보이므로 사용 중 칸 끝에 꺼내 둔다 — 끌어 옮기면 바로잡힌다.
+// 화면 순서: 사용 중 칸은 최상위 → 하위 → 그 하위(깊이 우선), 휴면 칸은 휴면 묶음마다 같은 순서.
+// 어디에도 안 걸리는 폴더(부모가 사라졌거나 4단계 이상)는 사이드바엔 안 보이므로 사용 중 칸 끝에 꺼내 둔다 — 끌어 옮기면 바로잡힌다.
 function fmSections() {
   const placed = new Set();
-  const sec = (dormant) => folders.filter((f) => !f.parentId && !!f.dormant === dormant).sort(sortBySortOrder).map((top) => {
-    const children = getChildFolders(top.id);
-    placed.add(top.id);
-    children.forEach((c) => placed.add(c.id));
-    return { top, children };
-  });
-  const active = sec(false);
-  const dormant = sec(true);
+  const tree = (tops) => { const rows = folderTree(tops); rows.forEach((r) => placed.add(r.f.id)); return rows; };
+  const active = tree(folders.filter((f) => !f.parentId && !f.dormant).sort(sortBySortOrder));
+  const groups = dormantGroups().map((g) => ({ ...g, rows: tree(g.tops) }));
   const stray = folders.filter((f) => !placed.has(f.id)).sort(sortBySortOrder);
-  return { active, dormant, stray };
+  return { active, groups, stray };
 }
 
-function fmRowHtml(f, kind) {
-  // kind: 'top' | 'child' | 'stray'
-  const count = kind === 'top' ? getFolderMemoCount(f.id) : memos.filter((m) => m.folder === f.id && isVisibleMemo(m)).length;
+function fmRowHtml(f, depth, stray) {
+  const count = getFolderMemoCount(f.id);
   const name = fm.editing === f.id
     ? `<input class="fm-input" value="${escapeHtml(f.name)}" maxlength="60" aria-label="폴더 이름">`
     : `<span class="fm-name-text">${escapeHtml(f.name)}</span>${f.password ? `<span class="fm-lock" title="비밀번호 걸림">${ico('lock')}</span>` : ''}`;
   const sel = fm.selected.has(f.id);
-  return `<div class="fm-row${kind === 'child' ? ' fm-child' : ''}${sel ? ' selected' : ''}" data-id="${f.id}" data-parent="${kind === 'child' ? f.parentId : ''}"${kind === 'stray' ? ' data-stray="1"' : ''}>
+  return `<div class="fm-row fm-d${depth}${sel ? ' selected' : ''}" data-id="${f.id}" data-depth="${depth}" data-parent="${depth > 1 ? f.parentId : ''}"${stray ? ' data-stray="1"' : ''}>
     <label class="fm-check" title="선택"><input type="checkbox" data-check="${f.id}"${sel ? ' checked' : ''}></label>
     <span class="fm-grip" title="끌어서 옮기기">${ico('grip')}</span>
     <span class="fm-name">${ico('folder')}${name}</span>
@@ -1779,8 +1948,8 @@ function fmRowHtml(f, kind) {
   </div>`;
 }
 
-function fmNewRowHtml(isChild) {
-  return `<div class="fm-row fm-new${isChild ? ' fm-child' : ''}">
+function fmNewRowHtml(depth) {
+  return `<div class="fm-row fm-new fm-d${depth}">
     <span class="fm-check"></span>
     <span class="fm-grip"></span>
     <span class="fm-name">${ico('folder')}<input class="fm-input" placeholder="새 폴더 이름" maxlength="60" aria-label="새 폴더 이름"></span>
@@ -1798,27 +1967,40 @@ function renderFolderManager(force) {
   closeFmMenu();
   const oldInput = fm.body.querySelector('.fm-input');
   if (oldInput) oldInput._done = true;   // 지워지는 입력칸의 blur 가 새 입력칸 값으로 저장하지 않게
-  const { active, dormant, stray } = fmSections();
+  const { active, groups, stray } = fmSections();
   const creating = fm.creating;
-  const blocks = (list) => list.map(({ top, children }) =>
-    fmRowHtml(top, 'top') +
-    children.map((c) => fmRowHtml(c, 'child')).join('') +
-    (creating && creating.parentId === top.id ? fmNewRowHtml(true) : '')
-  ).join('');
-  const activeHtml = blocks(active) + stray.map((f) => fmRowHtml(f, 'stray')).join('') +
-    (creating && !creating.parentId ? fmNewRowHtml(false) : '');
-  const dormantHtml = blocks(dormant);
-  const nActive = active.length + active.reduce((n, b) => n + b.children.length, 0) + stray.length;
-  const nDormant = dormant.length + dormant.reduce((n, b) => n + b.children.length, 0);
+  // 하위 폴더를 만드는 중이면 그 부모 묶음(하위·손자 포함) 맨 끝에 입력 줄을 끼운다
+  const rowsHtml = (rows) => {
+    let at = -1, depth = 0;
+    if (creating && creating.parentId) {
+      const sub = new Set([creating.parentId, ...getDescendantIds(creating.parentId)]);
+      rows.forEach((r, i) => { if (sub.has(r.f.id)) at = i; });
+      const p = rows.find((r) => r.f.id === creating.parentId);
+      depth = p ? p.depth + 1 : 0;
+    }
+    return rows.map((r, i) => fmRowHtml(r.f, r.depth) + (i === at && depth ? fmNewRowHtml(depth) : '')).join('');
+  };
+  const activeHtml = rowsHtml(active) + stray.map((f) => fmRowHtml(f, 1, true)).join('') +
+    (creating && !creating.parentId ? fmNewRowHtml(1) : '');
+  const groupsHtml = groups.map((g) => `
+    <div class="fm-group" data-note="${escapeHtml(g.note)}">
+      <div class="fm-group-head">
+        ${ico('tag')}<span class="fm-group-note${g.note ? '' : ' empty'}">${g.note ? escapeHtml(g.note) : '휴면 메모 없음'}</span>
+        <span class="fm-group-meta">폴더 ${g.rows.length}${g.at ? ' · ' + formatDay(g.at) + ' 휴면' : ''}</span>
+        <button class="fm-more" data-act="gmenu" type="button" title="묶음 메뉴">${ico('more')}</button>
+      </div>
+      ${rowsHtml(g.rows)}
+    </div>`).join('');
+  const nDormant = groups.reduce((n, g) => n + g.rows.length, 0);
   const scroll = fm.body.scrollTop;
   fm.body.innerHTML = `
     <div class="fm-section" data-section="active">
-      <div class="fm-section-head">${ico('folder')} 폴더 <span class="fm-section-n">${nActive}</span></div>
+      <div class="fm-section-head">${ico('folder')} 폴더 <span class="fm-section-n">${active.length + stray.length}</span></div>
       ${activeHtml || '<div class="fm-empty">비어 있음</div>'}
     </div>
     <div class="fm-section" data-section="dormant">
       <div class="fm-section-head">${ico('moon')} 휴면 <span class="fm-section-n">${nDormant}</span></div>
-      ${dormantHtml || '<div class="fm-empty">비어 있음</div>'}
+      ${groupsHtml || '<div class="fm-empty">비어 있음</div>'}
     </div>`;
   fm.body.scrollTop = scroll;
   updateFmSelection();
@@ -1854,9 +2036,12 @@ function onFmBodyClick(e) {
   if (cb) { toggleFmSelect(cb.dataset.check, cb.checked, e.shiftKey); return; }
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
-  const id = btn.closest('.fm-row').dataset.id;
   if (btn.dataset.act === 'menu') {
-    if (fm.menu && fm.menu.id === id) closeFmMenu(); else openFmMenu(id, btn);
+    const id = btn.closest('.fm-row').dataset.id;
+    if (fm.menu && fm.menu.key === id) closeFmMenu(); else openFolderMenu(id, btn);
+  } else if (btn.dataset.act === 'gmenu') {
+    const note = btn.closest('.fm-group').dataset.note;
+    if (fm.menu && fm.menu.key === 'g:' + note) closeFmMenu(); else openGroupMenu(note, btn);
   }
 }
 
@@ -1873,7 +2058,7 @@ function toggleFmSelect(id, on, shift) {
   updateFmSelection();
 }
 
-// 줄 표시·체크 상태와 위쪽 선택 막대(N개 선택 · 휴면 처리 · 휴면 해제 · 삭제)를 맞춘다
+// 줄 표시·체크 상태와 위쪽 선택 막대(N개 선택 · 옮기기 · 휴면 처리 · 휴면 해제 · 삭제)를 맞춘다
 function updateFmSelection() {
   if (!fm) return;
   for (const id of fm.selected) if (!folders.some((f) => f.id === id)) fm.selected.delete(id);
@@ -1895,9 +2080,12 @@ function updateFmSelection() {
   bar.innerHTML = `
     <button class="fm-icon-btn" data-sel="clear" type="button" title="선택 해제">${ico('close')}</button>
     <span class="fm-sel-n">${n}개 선택</span>
-    ${canSleep ? `<button class="fm-sel-btn" data-sel="sleep" type="button">${ico('moon')}<span>휴면 처리</span></button>` : ''}
-    ${canWake ? `<button class="fm-sel-btn" data-sel="wake" type="button">${ico('sun')}<span>휴면 해제</span></button>` : ''}
-    <button class="fm-sel-btn danger" data-sel="delete" type="button">${ico('trash')}<span>삭제</span></button>`;
+    <span class="fm-sel-actions">
+      <button class="fm-sel-btn" data-sel="move" type="button">${ico('folder-move')}<span>옮기기</span></button>
+      ${canSleep ? `<button class="fm-sel-btn" data-sel="sleep" type="button">${ico('moon')}<span>휴면 처리</span></button>` : ''}
+      ${canWake ? `<button class="fm-sel-btn" data-sel="wake" type="button">${ico('sun')}<span>휴면 해제</span></button>` : ''}
+      <button class="fm-sel-btn danger" data-sel="delete" type="button">${ico('trash')}<span>삭제</span></button>
+    </span>`;
 }
 
 function onFmSelbarClick(e) {
@@ -1906,26 +2094,15 @@ function onFmSelbarClick(e) {
   const ids = [...fm.selected];
   const done = () => { if (fm) { fm.selected.clear(); updateFmSelection(); } };
   if (b.dataset.sel === 'clear') done();
-  else if (b.dataset.sel === 'sleep') { setFoldersDormant(ids, true); done(); }
+  else if (b.dataset.sel === 'move') showMoveFoldersDialog(ids, done);
+  else if (b.dataset.sel === 'sleep') showDormantDialog(ids, { mode: 'sleep', onDone: done });
   else if (b.dataset.sel === 'wake') { setFoldersDormant(ids, false); done(); }
   else if (b.dataset.sel === 'delete') confirmDeleteFolders(ids, done);
 }
 
-function openFmMenu(id, anchor) {
+// ⋮ 메뉴 하나를 단추 아래에 띄운다. items = [[동작, 아이콘, 글자], …]
+function openFmMenu({ key, anchor, row, items, onPick }) {
   closeFmMenu();
-  const f = folders.find((x) => x.id === id);
-  if (!f) return;
-  const row = anchor.closest('.fm-row');
-  const isTop = !row.dataset.parent && !row.dataset.stray;
-  const items = [
-    ['open', 'folder', '열기'],
-    ['rename', 'edit', '이름 바꾸기'],
-    isTop ? ['child', 'folder-plus', '하위 폴더 만들기'] : null,
-    ['move', 'folder-move', '다른 폴더로 옮기기'],
-    ['password', f.password ? 'lock' : 'key', f.password ? '비밀번호 바꾸기·풀기' : '비밀번호 걸기'],
-    isTop ? ['dormant', f.dormant ? 'sun' : 'moon', f.dormant ? '휴면 해제' : '휴면 처리'] : null,
-    ['delete', 'trash', '삭제'],
-  ].filter(Boolean);
   const menu = document.createElement('div');
   menu.className = 'fm-menu';
   menu.innerHTML = items.map(([act, icon, label]) =>
@@ -1939,12 +2116,48 @@ function openFmMenu(id, anchor) {
   menu.style.top = top + 'px';
   menu.style.left = Math.max(8, Math.min(r.right - mw, innerWidth - mw - 8)) + 'px';
   row.classList.add('menu-open');
-  fm.menu = { el: menu, id, row };
+  fm.menu = { el: menu, key, row };
   menu.addEventListener('click', (e) => {
     const b = e.target.closest('[data-mact]');
     if (!b) return;
     closeFmMenu();
-    runFmAction(b.dataset.mact, id);
+    onPick(b.dataset.mact);
+  });
+}
+
+function openFolderMenu(id, anchor) {
+  const f = folders.find((x) => x.id === id);
+  if (!f) return;
+  const row = anchor.closest('.fm-row');
+  const depth = Number(row.dataset.depth) || 1;
+  const stray = !!row.dataset.stray;
+  const isTop = depth === 1 && !stray;
+  const items = [
+    ['open', 'folder', '열기'],
+    ['rename', 'edit', '이름 바꾸기'],
+    depth < MAX_FOLDER_DEPTH && !stray ? ['child', 'folder-plus', '하위 폴더 만들기'] : null,
+    ['move', 'folder-move', '다른 폴더로 옮기기'],
+    ['password', f.password ? 'lock' : 'key', f.password ? '비밀번호 바꾸기·풀기' : '비밀번호 걸기'],
+    isTop && !f.dormant ? ['sleep', 'moon', '휴면 처리'] : null,
+    isTop && f.dormant ? ['note', 'tag', '휴면 메모 바꾸기'] : null,
+    isTop && f.dormant ? ['wake', 'sun', '휴면 해제'] : null,
+    ['delete', 'trash', '삭제'],
+  ].filter(Boolean);
+  openFmMenu({ key: id, anchor, row, items, onPick: (act) => runFmAction(act, id) });
+}
+
+// 휴면 묶음 머리줄의 ⋮ — 묶음 메모 고치기·모두 휴면 해제
+function openGroupMenu(note, anchor) {
+  const ids = folders.filter((f) => !f.parentId && f.dormant && (f.dormantNote || '') === note).map((f) => f.id);
+  openFmMenu({
+    key: 'g:' + note,
+    anchor,
+    row: anchor.closest('.fm-group-head'),
+    items: [['gnote', 'tag', note ? '휴면 메모 고치기' : '휴면 메모 달기'], ['gwake', 'sun', '모두 휴면 해제']],
+    onPick: (act) => {
+      if (act === 'gnote') showDormantDialog(ids, { mode: 'note', note });
+      else if (act === 'gwake') setFoldersDormant(ids, false);
+    },
   });
 }
 
@@ -1956,12 +2169,15 @@ function closeFmMenu() {
 }
 
 function runFmAction(act, id) {
+  const f = folders.find((x) => x.id === id);
   if (act === 'open') openFolderFromManager(id);
   else if (act === 'rename') startFmRename(id);
   else if (act === 'child') startFmCreate(id);
-  else if (act === 'move') showMoveFolderDialog(id);
+  else if (act === 'move') showMoveFoldersDialog([id]);
   else if (act === 'password') showSetPasswordDialog(id);
-  else if (act === 'dormant') toggleDormant(id);
+  else if (act === 'sleep') showDormantDialog([id], { mode: 'sleep' });
+  else if (act === 'note') showDormantDialog([id], { mode: 'note', note: (f && f.dormantNote) || '' });
+  else if (act === 'wake') setFoldersDormant([id], false);
   else if (act === 'delete') confirmDeleteFolder(id);
 }
 
@@ -1985,6 +2201,7 @@ function startFmRename(id) {
 
 function startFmCreate(parentId) {
   if (!fm || fm.drag) return;
+  if (parentId && folderDepth(parentId) >= MAX_FOLDER_DEPTH) return;
   fm.editing = null;
   fm.creating = { parentId };
   renderFolderManager(true);
@@ -2014,7 +2231,7 @@ function commitFmEdit(value) {
   } else if (fm.creating) {
     const parentId = fm.creating.parentId;
     fm.creating = null;
-    if (name && (!parentId || folders.some((p) => p.id === parentId))) {
+    if (name && (!parentId || (folders.some((p) => p.id === parentId) && folderDepth(parentId) < MAX_FOLDER_DEPTH))) {
       const nf = { id: crypto.randomUUID(), name, parentId, sortOrder: nextSortOrder(parentId), updatedAt: Date.now() };
       folders.push(nf);
       flashId = nf.id;
@@ -2036,7 +2253,7 @@ function startFmDrag(e, row) {
   const id = row.dataset.id;
   const f = folders.find((x) => x.id === id);
   if (!f) return;
-  const blockIds = new Set([id, ...folders.filter((c) => c.parentId === id).map((c) => c.id)]);
+  const blockIds = new Set([id, ...getDescendantIds(id)]);
   fm.body.querySelectorAll('.fm-row[data-id]').forEach((r) => { if (blockIds.has(r.dataset.id)) r.classList.add('fm-dragging'); });
   const ghost = document.createElement('div');
   ghost.className = 'fm-ghost';
@@ -2049,7 +2266,7 @@ function startFmDrag(e, row) {
   const onUp = (ev) => { if (ev.pointerId === d.pointerId) endFmDrag(true); };
   const onCancel = (ev) => { if (ev.pointerId === d.pointerId) endFmDrag(false); };
   const d = fm.drag = {
-    id, hasKids: blockIds.size > 1, ghost, line, x: e.clientX, y: e.clientY, target: null, raf: 0, pointerId: e.pointerId,
+    id, ghost, line, x: e.clientX, y: e.clientY, target: null, raf: 0, pointerId: e.pointerId,
     off: () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
@@ -2075,7 +2292,8 @@ function startFmDrag(e, row) {
   d.raf = requestAnimationFrame(tick);
 }
 
-// 손가락·마우스 위치 → 놓을 자리. { into: 폴더id } 또는 { parentId, dormant, beforeId, lineEl, section }
+// 손가락·마우스 위치 → 놓을 자리. { into: 폴더id } 또는 { parentId, dormant, note, beforeId, lineEl, box }
+// 놓을 수 있는 칸(box) = 사용 중 칸, 휴면 묶음 하나하나(묶음이 하나도 없으면 휴면 칸 자체)
 function fmDropTarget(x, y) {
   const d = fm.drag;
   const br = fm.body.getBoundingClientRect();
@@ -2083,35 +2301,49 @@ function fmDropTarget(x, y) {
   const hy = Math.min(Math.max(y, br.top + 1), br.bottom - 1);
   const el = document.elementFromPoint(hx, hy);
   if (!el || !fm.body.contains(el)) return null;
-  let section = el.closest('.fm-section');
-  let outside = 0;   // 칸 사이·아래 여백이면 가장 가까운 칸의 맨 앞(-1)·맨 끝(1)
-  if (!section) {
+  const dormantSec = fm.body.querySelector('.fm-section[data-section="dormant"]');
+  const groupEls = [...fm.body.querySelectorAll('.fm-group')];
+  const boxes = [fm.body.querySelector('.fm-section[data-section="active"]'), ...(groupEls.length ? groupEls : [dormantSec])];
+  let box = el.closest('.fm-group') || el.closest('.fm-section');
+  let outside = 0;   // 칸 사이·머리줄·아래 여백이면 가장 가까운 칸의 맨 앞(-1)·맨 끝(1)
+  if (!boxes.includes(box)) {
+    box = null;
     let best = Infinity;
-    fm.body.querySelectorAll('.fm-section').forEach((s) => {
-      const sr = s.getBoundingClientRect();
-      const dist = hy < sr.top ? sr.top - hy : hy > sr.bottom ? hy - sr.bottom : 0;
-      if (dist < best) { best = dist; section = s; outside = hy < sr.top ? -1 : 1; }
-    });
-    if (!section) return null;
-  }
-  const dormant = section.dataset.section === 'dormant';
-  const rows = [...section.querySelectorAll('.fm-row[data-id]')];
-  // beforeEl 앞(없으면 칸 맨 끝)에 넣기. 하위 줄 앞이면 그 부모의 하위로 들어간다
-  const gap = (beforeEl) => {
-    if (beforeEl && beforeEl.dataset.parent) {
-      if (!d.hasKids) return { parentId: beforeEl.dataset.parent, dormant: false, beforeId: beforeEl.dataset.id, lineEl: beforeEl, section };
-      // 하위 폴더가 있는 폴더는 최상위로만 → 그 부모 묶음 바로 뒤
-      let i = rows.indexOf(beforeEl);
-      while (rows[i] && rows[i].dataset.parent) i++;
-      beforeEl = rows[i] || null;
+    for (const b of boxes) {
+      const r = b.getBoundingClientRect();
+      const dist = hy < r.top ? r.top - hy : hy > r.bottom ? hy - r.bottom : 0;
+      if (dist < best) { best = dist; box = b; outside = hy < r.top ? -1 : 1; }
     }
-    return { parentId: null, dormant, beforeId: beforeEl ? beforeEl.dataset.id : null, lineEl: beforeEl, section };
+    if (!box) return null;
+  }
+  const isDormant = box !== boxes[0];
+  const note = box.classList.contains('fm-group') ? box.dataset.note : '';
+  const rows = [...box.querySelectorAll('.fm-row[data-id]')];
+  // beforeEl 앞(없으면 칸 맨 끝)에 넣기 = beforeEl 의 부모 아래로.
+  // 그 부모 아래로 못 들어가면(3단계 초과) 한 단계 위로: 부모 바로 다음 자리(부모의 다음 형제 앞, 없으면 그 윗부모 묶음 끝)
+  const gap = (beforeEl) => {
+    let parent = beforeEl ? (beforeEl.dataset.parent || null) : null;
+    let beforeId = beforeEl ? beforeEl.dataset.id : null;
+    let lineEl = beforeEl;
+    while (parent && !canMoveFolderUnder(d.id, parent)) {
+      const pRow = rows.find((x) => x.dataset.id === parent);
+      if (!pRow) { parent = null; break; }
+      const pDepth = Number(pRow.dataset.depth);
+      let i = rows.indexOf(pRow) + 1;
+      while (rows[i] && Number(rows[i].dataset.depth) > pDepth) i++;
+      const next = rows[i] && Number(rows[i].dataset.depth) === pDepth ? rows[i] : null;
+      parent = pRow.dataset.parent || null;
+      beforeId = next ? next.dataset.id : null;
+      lineEl = rows[i] || null;
+    }
+    if (parent) return { parentId: parent, beforeId, lineEl, box };
+    return { parentId: null, dormant: isDormant, note: isDormant ? note : undefined, beforeId, lineEl, box };
   };
   const rowEl = outside ? null : el.closest('.fm-row[data-id]');
-  if (!rowEl) return gap(outside < 0 || el.closest('.fm-section-head') ? (rows[0] || null) : null);
+  if (!rowEl) return gap(outside < 0 || el.closest('.fm-section-head, .fm-group-head') ? (rows[0] || null) : null);
   const r = rowEl.getBoundingClientRect();
   const rel = (hy - r.top) / r.height;
-  const canInto = !rowEl.dataset.parent && !rowEl.dataset.stray && rowEl.dataset.id !== d.id && !d.hasKids;
+  const canInto = !rowEl.dataset.stray && rowEl.dataset.id !== d.id && canMoveFolderUnder(d.id, rowEl.dataset.id);
   if (canInto && rel > 0.25 && rel < 0.75) return { into: rowEl.dataset.id };
   if (rel < 0.5) return gap(rowEl);
   return gap(rows[rows.indexOf(rowEl) + 1] || null);
@@ -2121,7 +2353,7 @@ function fmTargetPlan(t) {
   if (!t) return null;
   const plan = t.into
     ? planFolderMove(fm.drag.id, { parentId: t.into })
-    : planFolderMove(fm.drag.id, { parentId: t.parentId, dormant: t.dormant, beforeId: t.beforeId });
+    : planFolderMove(fm.drag.id, { parentId: t.parentId, dormant: t.dormant, beforeId: t.beforeId, note: t.note });
   return plan && plan.moved ? plan : null;
 }
 
@@ -2139,13 +2371,14 @@ function updateFmDrag() {
   let top;
   if (t.lineEl) top = t.lineEl.offsetTop;
   else {
-    const last = [...t.section.querySelectorAll('.fm-row')].pop();
-    if (!last) { const empty = t.section.querySelector('.fm-empty'); if (empty) empty.classList.add('fm-drop-here'); return; }
+    const last = [...t.box.querySelectorAll('.fm-row')].pop();
+    if (!last) { const empty = t.box.querySelector('.fm-empty'); if (empty) empty.classList.add('fm-drop-here'); return; }
     top = last.offsetTop + last.offsetHeight;
   }
   d.line.style.top = (top - 1) + 'px';
-  // 하위로 들어가는 자리는 하위 줄 손잡이 위치부터 들여 긋는다
-  d.line.style.left = (t.parentId && t.lineEl ? t.lineEl.querySelector('.fm-grip').offsetLeft : 10) + 'px';
+  // 하위로 들어가는 자리는 들어갈 단계의 손잡이 위치부터 들여 긋는다
+  const base = fm.body.querySelector('.fm-row.fm-d1 .fm-grip');
+  d.line.style.left = (t.parentId && base ? base.offsetLeft + folderDepth(t.parentId) * 28 : 10) + 'px';
   d.line.style.display = 'block';
 }
 
@@ -2354,7 +2587,7 @@ function restoreFromTrash(index) {
     const exists = folders.some((f) => f.name === item.data.name);
     if (exists) item.data.name += ' (복원)';
     // 부모 폴더가 없으면 최상위로 복원
-    if (item.data.parentId && !folders.some((f) => f.id === item.data.parentId)) {
+    if (item.data.parentId && (!folders.some((f) => f.id === item.data.parentId) || folderDepth(item.data.parentId) >= MAX_FOLDER_DEPTH)) {
       item.data.parentId = null;
     }
     item.data.sortOrder = nextSortOrder(item.data.parentId || null);
@@ -2541,13 +2774,9 @@ function updateFolderSelect(selectedFolder) {
 
   // 드롭다운 리스트 생성
   let html = `<div class="folder-select-item ${!selectedFolder ? 'active' : ''}" data-folder="">-- 폴더 없음 --</div>`;
-  const topFolders = folders.filter((f) => !f.parentId).sort(sortBySortOrder);
-  for (const f of topFolders) {
-    html += `<div class="folder-select-item ${f.id === selectedFolder ? 'active' : ''}" data-folder="${f.id}">${escapeHtml(f.name)}</div>`;
-    const children = getChildFolders(f.id);
-    for (const c of children) {
-      html += `<div class="folder-select-item folder-select-item--child ${c.id === selectedFolder ? 'active' : ''}" data-folder="${c.id}">└ ${escapeHtml(c.name)}</div>`;
-    }
+  for (const { f, depth } of folderTree(topFoldersInOrder())) {
+    const cls = depth === 2 ? ' folder-select-item--child' : depth === 3 ? ' folder-select-item--grand' : '';
+    html += `<div class="folder-select-item${cls} ${f.id === selectedFolder ? 'active' : ''}" data-folder="${f.id}">${depth > 1 ? '└ ' : ''}${escapeHtml(f.name)}</div>`;
   }
   const list = $('#folder-select-list');
   if (list) list.innerHTML = html;
@@ -2977,7 +3206,7 @@ function showHelpDialog() {
         <p class="help-h">🗂️ 폴더·정리</p>
         <ul>
           <li>${ico('folder')} 현재 글을 폴더에 지정 — 빈 글도 폴더를 정하면 사라지지 않습니다</li>
-          <li><b>폴더 관리</b> — 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'. 순서·이름·휴면·비밀번호·삭제를 한 화면에서</li>
+          <li><b>폴더 관리</b> — 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'. 순서·이름·옮기기·휴면(메모 달기)·비밀번호·삭제를 한 화면에서. 체크박스로 여러 개를 한꺼번에. 폴더는 3단계까지</li>
           <li>${ico('more')} 더보기에서 즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
           <li>${ico('select')} 선택 모드로 여러 글을 한 번에 이동·삭제</li>
         </ul>
@@ -3618,13 +3847,8 @@ function bulkMoveUnified() {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     let opts = '<option value="">-- 폴더 없음 --</option>';
-    const topFolders = folders.filter((f) => !f.parentId && !f.dormant).sort(sortBySortOrder);
-    for (const f of topFolders) {
-      opts += '<option value="' + f.id + '">' + escapeHtml(f.name) + '</option>';
-      const children = getChildFolders(f.id);
-      for (const c of children) {
-        opts += '<option value="' + c.id + '">　' + escapeHtml(c.name) + '</option>';
-      }
+    for (const { f, depth } of folderTree(folders.filter((x) => !x.parentId && !x.dormant).sort(sortBySortOrder))) {
+      opts += '<option value="' + f.id + '">' + '\u3000'.repeat(depth - 1) + escapeHtml(f.name) + '</option>';
     }
     overlay.innerHTML = '<div class="modal-box"><p>' + selectedMemos.size + '개 메모를 이동할 폴더를 선택하세요</p><select style="width:100%;padding:8px;margin-bottom:16px;border:1px solid var(--border);border-radius:var(--radius);font-size:0.9rem;">' + opts + '</select><div><button class="btn btn-primary" id="bm-ok">이동</button> <button class="btn btn-secondary" id="bm-cancel">취소</button></div></div>';
     document.body.appendChild(overlay);
@@ -3644,44 +3868,8 @@ function bulkMoveUnified() {
     };
     overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
   } else {
-    // 폴더 이동
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    const excludeIds = new Set(selectedFolders);
-    for (const id of selectedFolders) {
-      getChildFolders(id).forEach((c) => excludeIds.add(c.id));
-    }
-    let opts = '<option value="__top__">-- 최상위 (상위폴더 없음) --</option>';
-    const topFolders = folders.filter((f) => !f.parentId && !f.dormant && !excludeIds.has(f.id)).sort(sortBySortOrder);
-    for (const f of topFolders) {
-      opts += '<option value="' + f.id + '">' + escapeHtml(f.name) + '</option>';
-    }
-    overlay.innerHTML = '<div class="modal-box"><p>' + selectedFolders.size + '개 폴더를 이동할 상위 폴더를 선택하세요</p><select style="width:100%;padding:8px;margin-bottom:16px;border:1px solid var(--border);border-radius:var(--radius);font-size:0.9rem;">' + opts + '</select><div><button class="btn btn-primary" id="bf-ok">이동</button> <button class="btn btn-secondary" id="bf-cancel">취소</button></div></div>';
-    document.body.appendChild(overlay);
-    overlay.querySelector('#bf-cancel').onclick = () => overlay.remove();
-    overlay.querySelector('#bf-ok').onclick = () => {
-      const target = overlay.querySelector('select').value;
-      const newParent = target === '__top__' ? null : target;
-      if (newParent && [...selectedFolders].some((id) => getChildFolders(id).length)) {
-        showToast('하위 폴더가 있는 폴더는 최상위로만 옮길 수 있습니다');
-        return;
-      }
-      for (const id of selectedFolders) {
-        const f = folders.find((x) => x.id === id);
-        if (f) {
-          f.parentId = newParent;
-          f.sortOrder = nextSortOrder(newParent);
-          f.updatedAt = Date.now();
-        }
-      }
-      selectedFolders.clear();
-      overlay.remove();
-      saveLocalData();
-      renderAll();
-      scheduleSyncToDropbox();
-      showToast('폴더가 이동되었습니다');
-    };
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    // 폴더 이동 — 폴더 관리 화면과 같은 대화상자
+    showMoveFoldersDialog([...selectedFolders], () => { selectedFolders.clear(); renderAll(); });
   }
 }
 
@@ -3721,10 +3909,10 @@ function updateFolderToggleLabel() {
   btn.innerHTML = ico('folder') + ' ' + escapeHtml(label);
 }
 
-function renderFolderItem(f, isChild) {
-  const count = isChild ? memos.filter((m) => m.folder === f.id && isVisibleMemo(m)).length : getFolderMemoCount(f.id);
+function renderFolderItem(f, depth) {
+  const count = getFolderMemoCount(f.id);
   const lockIcon = f.password ? ico(unlockedFolders.has(f.id) ? 'unlock' : 'lock') : '';
-  const childClass = isChild ? ' folder-item--child' : '';
+  const childClass = depth === 2 ? ' folder-item--child' : depth >= 3 ? ' folder-item--grand' : '';
   const folderCheckbox = selectMode ? `<input type="checkbox" class="folder-item-checkbox" data-folder-check="${f.id}"${selectedFolders.has(f.id) ? ' checked' : ''}>` : '';
   return `<div class="folder-item${childClass} ${currentFolder === f.id ? 'active' : ''}" data-folder="${f.id}">
     ${folderCheckbox}
@@ -3748,13 +3936,8 @@ function renderFolderList() {
   if (!selectMode || !folderListCollapsed) {
 
   // 활성 폴더 (휴면이 아닌 폴더)
-  const topFolders = folders.filter((f) => !f.parentId && !f.dormant).sort(sortBySortOrder);
-  for (const f of topFolders) {
-    html += renderFolderItem(f, false);
-    const children = getChildFolders(f.id);
-    for (const c of children) {
-      html += renderFolderItem(c, true);
-    }
+  for (const { f, depth } of folderTree(folders.filter((x) => !x.parentId && !x.dormant).sort(sortBySortOrder))) {
+    html += renderFolderItem(f, depth);
   }
 
   const noFolderCount = memos.filter((m) => !m.folder && isVisibleMemo(m)).length;
@@ -3765,20 +3948,20 @@ function renderFolderList() {
   }
 
   // 휴면 폴더 섹션
-  const dormantTopFolders = folders.filter((f) => !f.parentId && f.dormant).sort(sortBySortOrder);
-  if (dormantTopFolders.length > 0) {
+  const groups = dormantGroups();
+  if (groups.length > 0) {
     const dormantMemoCount = memos.filter((m) => dormantIds.has(m.folder) && isVisibleMemo(m)).length;
     html += `<div class="folder-dormant-toggle" id="dormant-toggle">
       <span>${ico('moon')} 휴면 폴더 <span class="folder-count">(${dormantMemoCount})</span></span>
       <span class="dormant-arrow">▶</span>
     </div>`;
     html += `<div class="folder-dormant-list" id="dormant-list" style="display:none;">`;
-    for (const f of dormantTopFolders) {
-      html += renderFolderItem(f, false);
-      const children = getChildFolders(f.id);
-      for (const c of children) {
-        html += renderFolderItem(c, true);
+    // 휴면 메모가 같은 폴더끼리 묶어, 묶음마다 메모를 이름표로 단다
+    for (const g of groups) {
+      if (g.note || groups.length > 1) {
+        html += `<div class="folder-dormant-group">${ico('tag')}<span>${g.note ? escapeHtml(g.note) : '휴면 메모 없음'}</span></div>`;
       }
+      for (const { f, depth } of folderTree(g.tops)) html += renderFolderItem(f, depth);
     }
     html += `</div>`;
   }
@@ -3942,8 +4125,8 @@ function renderMemoList() {
   if (currentFolder === '__none__') {
     filtered = filtered.filter((m) => !m.folder);
   } else if (currentFolder) {
-    const childIds = getChildFolders(currentFolder).map((f) => f.id);
-    filtered = filtered.filter((m) => m.folder === currentFolder || childIds.includes(m.folder));
+    const ids = new Set([currentFolder, ...getDescendantIds(currentFolder)]);
+    filtered = filtered.filter((m) => ids.has(m.folder));
   } else {
     // 전체 보기: 잠긴 폴더 + 휴면 폴더의 글 숨기기
     const dormantIds = getDormantFolderIds();
