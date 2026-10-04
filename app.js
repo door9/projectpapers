@@ -153,11 +153,8 @@ async function init() {
   // 같은 기기의 다른 창에서 저장하면(localStorage 변경) 이 창에 즉시 반영
   window.addEventListener('storage', onExternalStorageChange);
 
-  // 폴더 액션 메뉴 바깥 클릭 시 닫기
+  // 드롭다운 바깥 클릭 시 닫기
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('.folder-item')) {
-      document.querySelectorAll('.folder-actions-left.show, .folder-actions-right.show').forEach((a) => a.classList.remove('show'));
-    }
     if (!e.target.closest('#template-wrap')) {
       $('#template-dropdown').style.display = 'none';
     }
@@ -181,6 +178,7 @@ async function init() {
   $('#btn-folder-toggle').addEventListener('click', toggleFolderDropdown);
   $('#btn-fav-filter').addEventListener('click', toggleFavFilter);
   $('#btn-folder-add').addEventListener('click', showFolderDialog);
+  $('#btn-folder-manage').addEventListener('click', () => openFolderManager());
   $('#btn-sync').addEventListener('click', () => {
     if (!accessToken) { loginDropbox(); return; }
     syncFromDropbox();
@@ -1194,12 +1192,6 @@ function getChildFolders(parentId) {
   return folders.filter((f) => f.parentId === parentId).sort(sortBySortOrder);
 }
 
-function getSiblingFolders(folderId) {
-  const f = folders.find((x) => x.id === folderId);
-  if (!f) return [];
-  return folders.filter((x) => (x.parentId || null) === (f.parentId || null)).sort(sortBySortOrder);
-}
-
 function nextSortOrder(parentId) {
   const siblings = folders.filter((f) => (f.parentId || null) === (parentId || null));
   return siblings.length === 0 ? 0 : Math.max(...siblings.map((f) => f.sortOrder ?? 0)) + 1;
@@ -1506,40 +1498,6 @@ function showFolderDialog() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 }
 
-// 순서 변경 후에도 그 폴더의 액션 메뉴(▲▼…)를 열어둬 연속으로 옮길 수 있게 한다
-function reopenFolderActions(folderId) {
-  const row = folderList.querySelector(`.folder-item[data-folder="${folderId}"]`);
-  if (row) row.querySelectorAll('.folder-actions-left, .folder-actions-right').forEach((a) => a.classList.add('show'));
-}
-
-function moveFolderUp(folderId) {
-  const siblings = getSiblingFolders(folderId);
-  const idx = siblings.findIndex((f) => f.id === folderId);
-  if (idx <= 0) return;
-  const temp = siblings[idx].sortOrder;
-  siblings[idx].sortOrder = siblings[idx - 1].sortOrder;
-  siblings[idx - 1].sortOrder = temp;
-  siblings[idx].updatedAt = siblings[idx - 1].updatedAt = Date.now();
-  saveLocalData();
-  renderAll();
-  reopenFolderActions(folderId);
-  scheduleSyncToDropbox();
-}
-
-function moveFolderDown(folderId) {
-  const siblings = getSiblingFolders(folderId);
-  const idx = siblings.findIndex((f) => f.id === folderId);
-  if (idx < 0 || idx >= siblings.length - 1) return;
-  const temp = siblings[idx].sortOrder;
-  siblings[idx].sortOrder = siblings[idx + 1].sortOrder;
-  siblings[idx + 1].sortOrder = temp;
-  siblings[idx].updatedAt = siblings[idx + 1].updatedAt = Date.now();
-  saveLocalData();
-  renderAll();
-  reopenFolderActions(folderId);
-  scheduleSyncToDropbox();
-}
-
 function showMoveFolderDialog(id) {
   const folder = folders.find((f) => f.id === id);
   if (!folder) return;
@@ -1550,7 +1508,7 @@ function showMoveFolderDialog(id) {
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  let optionsHtml = `<option value="">-- 최상위 (이동 안 함) --</option>`;
+  let optionsHtml = `<option value="">-- 최상위 --</option>`;
   for (const f of topFolders) {
     const selected = folder.parentId === f.id ? ' selected' : '';
     optionsHtml += `<option value="${f.id}"${selected}>${escapeHtml(f.name)}</option>`;
@@ -1570,47 +1528,13 @@ function showMoveFolderDialog(id) {
   overlay.querySelector('#movef-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#movef-ok').onclick = () => {
     const newParent = overlay.querySelector('#move-folder-select').value || null;
-    folder.parentId = newParent;
-    folder.sortOrder = nextSortOrder(newParent);
-    folder.updatedAt = Date.now();
-    saveLocalData();
-    renderAll();
-    scheduleSyncToDropbox();
     overlay.remove();
+    if (newParent === (folder.parentId || null)) return;   // 그대로 두기를 골랐으면 순서도 건드리지 않는다
+    // 하위로 들어가면 휴면이 풀린다(부모를 따른다). 최상위로 나오면 지금 칸(사용 중/휴면) 맨 끝으로
+    const plan = planFolderMove(id, { parentId: newParent, dormant: !newParent && !!folder.dormant });
+    if (!plan) return;
+    applyFolderMove(plan);
     showToast('폴더가 이동되었습니다');
-  };
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-}
-
-function showRenameFolderDialog(id) {
-  const folder = folders.find((f) => f.id === id);
-  if (!folder) return;
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `
-    <div class="modal-box">
-      <p>폴더 이름 수정</p>
-      <input type="text" id="rename-folder-input" value="${escapeHtml(folder.name)}" placeholder="폴더 이름">
-      <button class="btn btn-secondary" id="rename-cancel">취소</button>
-      <button class="btn btn-primary" id="rename-ok">확인</button>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  const input = overlay.querySelector('#rename-folder-input');
-  input.focus();
-  input.select();
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') overlay.querySelector('#rename-ok').click(); });
-  overlay.querySelector('#rename-cancel').onclick = () => overlay.remove();
-  overlay.querySelector('#rename-ok').onclick = () => {
-    const newName = input.value.trim();
-    if (!newName) return;
-    folder.name = newName;
-    folder.updatedAt = Date.now();
-    saveLocalData();
-    renderAll();
-    scheduleSyncToDropbox();
-    overlay.remove();
-    showToast('폴더 이름이 변경되었습니다');
   };
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 }
@@ -1676,6 +1600,485 @@ function deleteFolder(id) {
   renderAll();
   scheduleSyncToDropbox();
   showToast('폴더가 휴지통으로 이동되었습니다');
+}
+
+// ── 폴더 옮기기 (순서·상위 폴더·휴면 칸) ──
+// target = { parentId, dormant, beforeId } — beforeId 앞에 넣는다(없으면 그 칸 맨 끝).
+// 최상위는 [사용 중 …, 휴면 …]을 한 줄로 보고 번호를 다시 매긴다. 실제로 자리가 바뀌는지(moved)도 함께 돌려준다.
+function planFolderMove(id, { parentId = null, dormant = false, beforeId = null } = {}) {
+  const f = folders.find((x) => x.id === id);
+  if (!f || parentId === id) return null;
+  if (parentId) {
+    const p = folders.find((x) => x.id === parentId);
+    if (!p || p.parentId) return null;                      // 2단계까지만
+    if (folders.some((c) => c.parentId === id)) return null; // 하위 폴더가 있는 폴더는 최상위로만
+    dormant = false;                                         // 하위 폴더는 부모의 휴면을 따른다
+  }
+  dormant = !!dormant;
+  const group = folders.filter((x) => (x.parentId || null) === parentId);
+  const before = parentId
+    ? group.sort(sortBySortOrder)
+    : [...group.filter((x) => !x.dormant).sort(sortBySortOrder), ...group.filter((x) => x.dormant).sort(sortBySortOrder)];
+  // 자기 자신 앞 = 지금 자리 그대로(바로 다음 폴더 앞)
+  if (beforeId === id) { const i = before.findIndex((x) => x.id === id); beforeId = before[i + 1] ? before[i + 1].id : null; }
+  const list = before.filter((x) => x.id !== id);
+  let idx = beforeId ? list.findIndex((x) => x.id === beforeId) : -1;
+  if (idx < 0) idx = (parentId || dormant) ? list.length : list.filter((x) => !x.dormant).length;
+  list.splice(idx, 0, f);
+  const moved = (f.parentId || null) !== parentId || !!f.dormant !== dormant ||
+    before.map((x) => x.id).join() !== list.map((x) => x.id).join();
+  return { f, parentId, dormant, list, moved };
+}
+
+function applyFolderMove(plan) {
+  const { f, parentId, dormant, list } = plan;
+  const now = Date.now();
+  if ((f.parentId || null) !== parentId) f.parentId = parentId;
+  if (!!f.dormant !== dormant) f.dormant = dormant;
+  f.updatedAt = now;
+  list.forEach((x, i) => { if (x.sortOrder !== i) { x.sortOrder = i; x.updatedAt = now; } });
+  saveLocalData();
+  renderAll();
+  scheduleSyncToDropbox();
+}
+
+// ── 폴더 관리 화면 (크롬 북마크 관리자처럼 한 화면에서) ──
+// 사이드바 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'로 연다.
+// 줄마다 버튼이 늘 보인다: 휴면(최상위만) · ⋮(열기·이름 바꾸기·하위 폴더·옮기기·비밀번호·삭제).
+// 왼쪽 손잡이를 끌어 순서를 바꾸고, 다른 폴더 위에 놓으면 그 하위로, 휴면 칸에 놓으면 휴면이 된다.
+let fm = null;   // 열려 있을 때 { el, body, editing, creating, menu, drag, openedAt }
+
+function openFolderManager(focusId) {
+  if (fm) { renderFolderManager(true); flashFolderRow(focusId); return; }
+  const el = document.createElement('div');
+  el.id = 'folder-manager';
+  el.innerHTML = `
+    <div class="fm-page" role="dialog" aria-label="폴더 관리">
+      <div class="fm-header">
+        <button class="fm-icon-btn" id="fm-close" title="닫기">${ico('close')}</button>
+        <h2>폴더 관리</h2>
+        <button class="fm-info" id="fm-info" type="button" title="사용법">ⓘ</button>
+        <button class="btn btn-primary" id="fm-add">+ 새 폴더</button>
+      </div>
+      <div class="fm-tip" id="fm-tip" hidden>
+        왼쪽 손잡이(${ico('grip')})를 끌어 순서 바꾸기 · 다른 폴더 위에 놓으면 그 하위로 · 휴면 칸에 놓으면 휴면<br>
+        이름은 두 번 클릭해 바로 고칠 수 있어요 · 휴면 폴더의 글은 '전체'에서 숨겨집니다
+      </div>
+      <div class="fm-body" id="fm-body"></div>
+    </div>`;
+  document.body.appendChild(el);
+  fm = { el, body: el.querySelector('#fm-body'), editing: null, creating: null, menu: null, drag: null, openedAt: Date.now() };
+
+  el.querySelector('#fm-close').onclick = () => closeFolderManager();
+  el.querySelector('#fm-info').onclick = () => { const t = el.querySelector('#fm-tip'); t.hidden = !t.hidden; };
+  el.querySelector('#fm-add').onclick = () => startFmCreate(null);
+  // 바깥(어두운 부분) 누르면 닫기 — PC 에서만 보인다
+  el.addEventListener('click', (e) => {
+    if (fm && fm.menu && !e.target.closest('.fm-menu') && !e.target.closest('[data-act="menu"]')) closeFmMenu();
+    if (e.target === el) closeFolderManager();
+  });
+  fm.body.addEventListener('click', onFmBodyClick);
+  fm.body.addEventListener('dblclick', (e) => {
+    const name = e.target.closest('.fm-name-text');
+    if (name) startFmRename(name.closest('.fm-row').dataset.id);
+  });
+  fm.body.addEventListener('pointerdown', (e) => {
+    const grip = e.target.closest('.fm-grip');
+    const row = grip && grip.closest('.fm-row[data-id]');
+    if (row) startFmDrag(e, row);
+  });
+  fm.body.addEventListener('scroll', () => closeFmMenu());
+  document.addEventListener('keydown', onFmKeydown);
+
+  // 휴대폰 뒤로가기 제스처가 앱·글 대신 이 화면을 먼저 닫도록 기록 한 칸을 쌓는다
+  history.pushState({ folderMgr: true }, '');
+  renderFolderManager(true);
+  flashFolderRow(focusId);
+}
+
+function closeFolderManager(fromPopstate) {
+  if (!fm) return;
+  if (fm.drag) endFmDrag(false);
+  closeFmMenu();
+  document.removeEventListener('keydown', onFmKeydown);
+  fm.el.remove();
+  fm = null;
+  if (!fromPopstate && history.state && history.state.folderMgr) { skipNextPopstate = true; history.back(); }
+}
+
+function onFmKeydown(e) {
+  if (!fm || e.key !== 'Escape') return;
+  if (document.querySelector('.modal-overlay, .delete-confirm')) return;   // 위에 뜬 대화상자 몫
+  e.preventDefault();
+  if (fm.drag) { endFmDrag(false); return; }
+  if (fm.menu) { closeFmMenu(); return; }
+  closeFolderManager();
+}
+
+// 화면 순서: 칸(사용 중/휴면)마다 최상위 → 그 하위. 어디에도 안 걸리는 폴더(부모가 사라졌거나 3단계)는
+// 사이드바엔 안 보이므로 사용 중 칸 끝에 꺼내 둔다 — 끌어 옮기면 바로잡힌다.
+function fmSections() {
+  const placed = new Set();
+  const sec = (dormant) => folders.filter((f) => !f.parentId && !!f.dormant === dormant).sort(sortBySortOrder).map((top) => {
+    const children = getChildFolders(top.id);
+    placed.add(top.id);
+    children.forEach((c) => placed.add(c.id));
+    return { top, children };
+  });
+  const active = sec(false);
+  const dormant = sec(true);
+  const stray = folders.filter((f) => !placed.has(f.id)).sort(sortBySortOrder);
+  return { active, dormant, stray };
+}
+
+function fmRowHtml(f, kind, dormant) {
+  // kind: 'top' | 'child' | 'stray'
+  const count = kind === 'top' ? getFolderMemoCount(f.id) : memos.filter((m) => m.folder === f.id && isVisibleMemo(m)).length;
+  const name = fm.editing === f.id
+    ? `<input class="fm-input" value="${escapeHtml(f.name)}" maxlength="60" aria-label="폴더 이름">`
+    : `<span class="fm-name-text">${escapeHtml(f.name)}</span>${f.password ? `<span class="fm-lock" title="비밀번호 걸림">${ico('lock')}</span>` : ''}`;
+  const dorm = kind === 'top'
+    ? `<button class="fm-dorm${dormant ? ' on' : ''}" data-act="dormant" type="button">${ico(dormant ? 'sun' : 'moon')}<span>${dormant ? '휴면 해제' : '휴면'}</span></button>`
+    : '<span class="fm-dorm-slot"></span>';
+  return `<div class="fm-row${kind === 'child' ? ' fm-child' : ''}" data-id="${f.id}" data-parent="${kind === 'child' ? f.parentId : ''}"${kind === 'stray' ? ' data-stray="1"' : ''}>
+    <span class="fm-grip" title="끌어서 옮기기">${ico('grip')}</span>
+    <span class="fm-name">${ico('folder')}${name}</span>
+    <span class="fm-count">${count}</span>
+    ${dorm}
+    <button class="fm-more" data-act="menu" type="button" title="더보기">${ico('more')}</button>
+  </div>`;
+}
+
+function fmNewRowHtml(isChild) {
+  return `<div class="fm-row fm-new${isChild ? ' fm-child' : ''}">
+    <span class="fm-grip"></span>
+    <span class="fm-name">${ico('folder')}<input class="fm-input" placeholder="새 폴더 이름" maxlength="60" aria-label="새 폴더 이름"></span>
+  </div>`;
+}
+
+// force: 이 화면 안에서 고친 직후. 아니면(동기화 등 바깥에서 바뀜) 끄는 중·입력 중엔 미뤄 둔다
+function renderFolderManager(force) {
+  if (!fm) return;
+  // 고치던 폴더가 (다른 기기에서 지워져) 사라졌으면 입력을 접는다
+  if (fm.editing && !folders.some((f) => f.id === fm.editing)) fm.editing = null;
+  if (fm.creating && fm.creating.parentId && !folders.some((f) => f.id === fm.creating.parentId)) fm.creating = null;
+  if (!force && (fm.drag || fm.editing || fm.creating)) { fm.pendingRender = true; return; }
+  fm.pendingRender = false;
+  closeFmMenu();
+  const oldInput = fm.body.querySelector('.fm-input');
+  if (oldInput) oldInput._done = true;   // 지워지는 입력칸의 blur 가 새 입력칸 값으로 저장하지 않게
+  const { active, dormant, stray } = fmSections();
+  const creating = fm.creating;
+  const blocks = (list, isDormant) => list.map(({ top, children }) =>
+    fmRowHtml(top, 'top', isDormant) +
+    children.map((c) => fmRowHtml(c, 'child', isDormant)).join('') +
+    (creating && creating.parentId === top.id ? fmNewRowHtml(true) : '')
+  ).join('');
+  const activeHtml = blocks(active, false) + stray.map((f) => fmRowHtml(f, 'stray', false)).join('') +
+    (creating && !creating.parentId ? fmNewRowHtml(false) : '');
+  const dormantHtml = blocks(dormant, true);
+  const nActive = active.length + active.reduce((n, b) => n + b.children.length, 0) + stray.length;
+  const nDormant = dormant.length + dormant.reduce((n, b) => n + b.children.length, 0);
+  const scroll = fm.body.scrollTop;
+  fm.body.innerHTML = `
+    <div class="fm-section" data-section="active">
+      <div class="fm-section-head">${ico('folder')} 폴더 <span class="fm-section-n">${nActive}</span></div>
+      ${activeHtml || '<div class="fm-empty">비어 있음</div>'}
+    </div>
+    <div class="fm-section" data-section="dormant">
+      <div class="fm-section-head">${ico('moon')} 휴면 <span class="fm-section-n">${nDormant}</span></div>
+      ${dormantHtml || '<div class="fm-empty">비어 있음</div>'}
+    </div>`;
+  fm.body.scrollTop = scroll;
+
+  const input = fm.body.querySelector('.fm-input');
+  if (input) {
+    const commit = () => { if (!input._done) { input._done = true; commitFmEdit(input.value); } };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); input._done = true; cancelFmEdit(); }
+    });
+    input.addEventListener('blur', commit);
+    input.scrollIntoView({ block: 'nearest' });
+    input.focus();
+    if (fm.editing) input.select();
+  }
+}
+
+function flashFolderRow(id) {
+  if (!fm || !id) return;
+  const row = fm.body.querySelector(`.fm-row[data-id="${id}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: 'nearest' });
+  row.classList.remove('fm-flash');
+  void row.offsetWidth;   // 같은 줄을 다시 깜박일 수 있게
+  row.classList.add('fm-flash');
+}
+
+function onFmBodyClick(e) {
+  // 길게 눌러 연 직후 손을 뗄 때 생기는 클릭이 그 자리 버튼을 누르지 않게
+  if (Date.now() - fm.openedAt < 400) return;
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const id = btn.closest('.fm-row').dataset.id;
+  if (btn.dataset.act === 'dormant') toggleDormant(id);
+  else if (btn.dataset.act === 'menu') {
+    if (fm.menu && fm.menu.id === id) closeFmMenu(); else openFmMenu(id, btn);
+  }
+}
+
+function openFmMenu(id, anchor) {
+  closeFmMenu();
+  const f = folders.find((x) => x.id === id);
+  if (!f) return;
+  const row = anchor.closest('.fm-row');
+  const isTop = !row.dataset.parent && !row.dataset.stray;
+  const items = [
+    ['open', 'folder', '열기'],
+    ['rename', 'edit', '이름 바꾸기'],
+    isTop ? ['child', 'folder-plus', '하위 폴더 만들기'] : null,
+    ['move', 'folder-move', '다른 폴더로 옮기기'],
+    ['password', f.password ? 'lock' : 'key', f.password ? '비밀번호 바꾸기·풀기' : '비밀번호 걸기'],
+    ['delete', 'trash', '삭제'],
+  ].filter(Boolean);
+  const menu = document.createElement('div');
+  menu.className = 'fm-menu';
+  menu.innerHTML = items.map(([act, icon, label]) =>
+    `<button type="button" data-mact="${act}"${act === 'delete' ? ' class="danger"' : ''}>${ico(icon)}<span>${label}</span></button>`).join('');
+  fm.el.appendChild(menu);
+  // 단추 아래 오른쪽 끝에 맞춘다. 아래 자리가 모자라면 위로
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  let top = r.bottom + 4;
+  if (top + mh > innerHeight - 8) top = Math.max(8, r.top - mh - 4);
+  menu.style.top = top + 'px';
+  menu.style.left = Math.max(8, Math.min(r.right - mw, innerWidth - mw - 8)) + 'px';
+  row.classList.add('menu-open');
+  fm.menu = { el: menu, id, row };
+  menu.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-mact]');
+    if (!b) return;
+    closeFmMenu();
+    runFmAction(b.dataset.mact, id);
+  });
+}
+
+function closeFmMenu() {
+  if (!fm || !fm.menu) return;
+  fm.menu.el.remove();
+  fm.menu.row.classList.remove('menu-open');
+  fm.menu = null;
+}
+
+function runFmAction(act, id) {
+  if (act === 'open') openFolderFromManager(id);
+  else if (act === 'rename') startFmRename(id);
+  else if (act === 'child') startFmCreate(id);
+  else if (act === 'move') showMoveFolderDialog(id);
+  else if (act === 'password') showSetPasswordDialog(id);
+  else if (act === 'delete') confirmDeleteFolder(id);
+}
+
+function openFolderFromManager(id) {
+  closeFolderManager();
+  const go = () => {
+    currentFolder = id;
+    renderAll();
+    if (!selectMode) $('#folder-dropdown').style.display = 'none';
+    if (window.innerWidth <= 768) $('#sidebar').classList.add('open');
+  };
+  if (isFolderLocked(id)) showPasswordPrompt(id, go); else go();
+}
+
+function startFmRename(id) {
+  if (!fm || fm.drag) return;
+  fm.creating = null;
+  fm.editing = id;
+  renderFolderManager(true);
+}
+
+function startFmCreate(parentId) {
+  if (!fm || fm.drag) return;
+  fm.editing = null;
+  fm.creating = { parentId };
+  renderFolderManager(true);
+}
+
+function cancelFmEdit() {
+  if (!fm) return;
+  fm.editing = null;
+  fm.creating = null;
+  renderFolderManager(true);
+}
+
+function commitFmEdit(value) {
+  if (!fm) return;
+  const name = value.trim();
+  let flashId = null;
+  if (fm.editing) {
+    const f = folders.find((x) => x.id === fm.editing);
+    fm.editing = null;
+    if (f && name && name !== f.name) {
+      f.name = name;
+      f.updatedAt = Date.now();
+      saveLocalData();
+      renderAll();
+      scheduleSyncToDropbox();
+    }
+  } else if (fm.creating) {
+    const parentId = fm.creating.parentId;
+    fm.creating = null;
+    if (name && (!parentId || folders.some((p) => p.id === parentId))) {
+      const nf = { id: crypto.randomUUID(), name, parentId, sortOrder: nextSortOrder(parentId), updatedAt: Date.now() };
+      folders.push(nf);
+      flashId = nf.id;
+      saveLocalData();
+      renderAll();
+      scheduleSyncToDropbox();
+    }
+  }
+  renderFolderManager(true);
+  flashFolderRow(flashId);
+}
+
+// ── 폴더 관리: 끌어서 옮기기 (마우스·손가락 공통 pointer 이벤트) ──
+function startFmDrag(e, row) {
+  if (e.button > 0 || fm.drag) return;
+  if (fm.editing || fm.creating) return;
+  e.preventDefault();
+  closeFmMenu();
+  const id = row.dataset.id;
+  const f = folders.find((x) => x.id === id);
+  if (!f) return;
+  const blockIds = new Set([id, ...folders.filter((c) => c.parentId === id).map((c) => c.id)]);
+  fm.body.querySelectorAll('.fm-row[data-id]').forEach((r) => { if (blockIds.has(r.dataset.id)) r.classList.add('fm-dragging'); });
+  const ghost = document.createElement('div');
+  ghost.className = 'fm-ghost';
+  ghost.innerHTML = ico('folder') + '<span>' + escapeHtml(f.name) + '</span>';
+  fm.el.appendChild(ghost);
+  const line = document.createElement('div');
+  line.className = 'fm-drop-line';
+  fm.body.appendChild(line);
+  const onMove = (ev) => { if (ev.pointerId !== d.pointerId) return; d.x = ev.clientX; d.y = ev.clientY; updateFmDrag(); };
+  const onUp = (ev) => { if (ev.pointerId === d.pointerId) endFmDrag(true); };
+  const onCancel = (ev) => { if (ev.pointerId === d.pointerId) endFmDrag(false); };
+  const d = fm.drag = {
+    id, hasKids: blockIds.size > 1, ghost, line, x: e.clientX, y: e.clientY, target: null, raf: 0, pointerId: e.pointerId,
+    off: () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    },
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onCancel);
+  document.body.classList.add('fm-drag-on');
+  updateFmDrag();
+  // 목록 위·아래 끝에 가까이 대면 저절로 굴린다
+  const tick = () => {
+    if (!fm || fm.drag !== d) return;
+    const br = fm.body.getBoundingClientRect();
+    const edge = 48;
+    let dy = 0;
+    if (d.y < br.top + edge) dy = -Math.ceil((br.top + edge - d.y) / 4);
+    else if (d.y > br.bottom - edge) dy = Math.ceil((d.y - (br.bottom - edge)) / 4);
+    if (dy) { fm.body.scrollTop += dy; updateFmDrag(); }
+    d.raf = requestAnimationFrame(tick);
+  };
+  d.raf = requestAnimationFrame(tick);
+}
+
+// 손가락·마우스 위치 → 놓을 자리. { into: 폴더id } 또는 { parentId, dormant, beforeId, lineEl, section }
+function fmDropTarget(x, y) {
+  const d = fm.drag;
+  const br = fm.body.getBoundingClientRect();
+  const hx = Math.min(Math.max(x, br.left + 24), br.right - 24);
+  const hy = Math.min(Math.max(y, br.top + 1), br.bottom - 1);
+  const el = document.elementFromPoint(hx, hy);
+  if (!el || !fm.body.contains(el)) return null;
+  let section = el.closest('.fm-section');
+  let outside = 0;   // 칸 사이·아래 여백이면 가장 가까운 칸의 맨 앞(-1)·맨 끝(1)
+  if (!section) {
+    let best = Infinity;
+    fm.body.querySelectorAll('.fm-section').forEach((s) => {
+      const sr = s.getBoundingClientRect();
+      const dist = hy < sr.top ? sr.top - hy : hy > sr.bottom ? hy - sr.bottom : 0;
+      if (dist < best) { best = dist; section = s; outside = hy < sr.top ? -1 : 1; }
+    });
+    if (!section) return null;
+  }
+  const dormant = section.dataset.section === 'dormant';
+  const rows = [...section.querySelectorAll('.fm-row[data-id]')];
+  // beforeEl 앞(없으면 칸 맨 끝)에 넣기. 하위 줄 앞이면 그 부모의 하위로 들어간다
+  const gap = (beforeEl) => {
+    if (beforeEl && beforeEl.dataset.parent) {
+      if (!d.hasKids) return { parentId: beforeEl.dataset.parent, dormant: false, beforeId: beforeEl.dataset.id, lineEl: beforeEl, section };
+      // 하위 폴더가 있는 폴더는 최상위로만 → 그 부모 묶음 바로 뒤
+      let i = rows.indexOf(beforeEl);
+      while (rows[i] && rows[i].dataset.parent) i++;
+      beforeEl = rows[i] || null;
+    }
+    return { parentId: null, dormant, beforeId: beforeEl ? beforeEl.dataset.id : null, lineEl: beforeEl, section };
+  };
+  const rowEl = outside ? null : el.closest('.fm-row[data-id]');
+  if (!rowEl) return gap(outside < 0 || el.closest('.fm-section-head') ? (rows[0] || null) : null);
+  const r = rowEl.getBoundingClientRect();
+  const rel = (hy - r.top) / r.height;
+  const canInto = !rowEl.dataset.parent && !rowEl.dataset.stray && rowEl.dataset.id !== d.id && !d.hasKids;
+  if (canInto && rel > 0.25 && rel < 0.75) return { into: rowEl.dataset.id };
+  if (rel < 0.5) return gap(rowEl);
+  return gap(rows[rows.indexOf(rowEl) + 1] || null);
+}
+
+function fmTargetPlan(t) {
+  if (!t) return null;
+  const plan = t.into
+    ? planFolderMove(fm.drag.id, { parentId: t.into })
+    : planFolderMove(fm.drag.id, { parentId: t.parentId, dormant: t.dormant, beforeId: t.beforeId });
+  return plan && plan.moved ? plan : null;
+}
+
+function updateFmDrag() {
+  const d = fm && fm.drag;
+  if (!d) return;
+  d.ghost.style.transform = `translate(${d.x + 14}px, ${d.y - 16}px)`;
+  const t = fmDropTarget(d.x, d.y);
+  d.target = fmTargetPlan(t) ? t : null;
+  fm.body.querySelectorAll('.fm-drop-into, .fm-drop-here').forEach((x) => x.classList.remove('fm-drop-into', 'fm-drop-here'));
+  d.line.style.display = 'none';
+  if (!d.target) return;
+  if (t.into) { fm.body.querySelector(`.fm-row[data-id="${t.into}"]`).classList.add('fm-drop-into'); return; }
+  // 줄을 그을 높이: 넣을 줄의 윗선, 칸 맨 끝이면 그 칸 마지막 줄의 아랫선(비었으면 '비어 있음' 상자)
+  let top;
+  if (t.lineEl) top = t.lineEl.offsetTop;
+  else {
+    const last = [...t.section.querySelectorAll('.fm-row')].pop();
+    if (!last) { const empty = t.section.querySelector('.fm-empty'); if (empty) empty.classList.add('fm-drop-here'); return; }
+    top = last.offsetTop + last.offsetHeight;
+  }
+  d.line.style.top = (top - 1) + 'px';
+  d.line.style.left = (t.parentId ? 66 : 10) + 'px';   // 하위로 들어가는 자리는 들여 긋는다
+  d.line.style.display = 'block';
+}
+
+function endFmDrag(commit) {
+  const d = fm && fm.drag;
+  if (!d) return;
+  d.off();
+  cancelAnimationFrame(d.raf);
+  d.ghost.remove();
+  d.line.remove();
+  document.body.classList.remove('fm-drag-on');
+  const plan = commit ? fmTargetPlan(d.target) : null;
+  const wasDormant = plan && !!plan.f.dormant;
+  fm.drag = null;
+  if (plan) {
+    applyFolderMove(plan);   // renderAll → 이 화면도 다시 그린다
+    if (wasDormant !== plan.dormant) showToast(plan.dormant ? '휴면 처리되었습니다' : '휴면이 해제되었습니다');
+  }
+  renderFolderManager(true);
+  if (plan) flashFolderRow(d.id);
 }
 
 // ── Memo CRUD ──
@@ -1958,6 +2361,7 @@ function showEditor(memo) {
 let skipNextPopstate = false;
 window.addEventListener('popstate', () => {
   if (skipNextPopstate) { skipNextPopstate = false; return; }
+  if (fm) { closeFolderManager(true); return; }   // 폴더 관리 화면이 떠 있으면 그것만 닫는다
   $('#sidebar').classList.remove('open');
   if (editorContainer.style.display === 'none') return;
   hideEditor();
@@ -2486,6 +2890,7 @@ function showHelpDialog() {
         <p class="help-h">🗂️ 폴더·정리</p>
         <ul>
           <li>${ico('folder')} 현재 글을 폴더에 지정 — 빈 글도 폴더를 정하면 사라지지 않습니다</li>
+          <li><b>폴더 관리</b> — 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'. 순서·이름·휴면·비밀번호·삭제를 한 화면에서</li>
           <li>${ico('more')} 더보기에서 즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
           <li>${ico('select')} 선택 모드로 여러 글을 한 번에 이동·삭제</li>
         </ul>
@@ -3197,6 +3602,7 @@ function bulkMoveUnified() {
 function renderAll() {
   renderFolderList();
   renderMemoList();
+  if (fm) renderFolderManager();
 }
 
 function toggleFolderDropdown() {
@@ -3232,21 +3638,10 @@ function renderFolderItem(f, isChild) {
   const count = isChild ? memos.filter((m) => m.folder === f.id && isVisibleMemo(m)).length : getFolderMemoCount(f.id);
   const lockIcon = f.password ? ico(unlockedFolders.has(f.id) ? 'unlock' : 'lock') : '';
   const childClass = isChild ? ' folder-item--child' : '';
-  const dormantIcon = (!isChild) ? `<span class="folder-dormant" data-dormant="${f.id}" title="${f.dormant ? '휴면 해제' : '휴면 처리'}">${ico(f.dormant ? 'sun' : 'moon')}</span>` : '';
   const folderCheckbox = selectMode ? `<input type="checkbox" class="folder-item-checkbox" data-folder-check="${f.id}"${selectedFolders.has(f.id) ? ' checked' : ''}>` : '';
   return `<div class="folder-item${childClass} ${currentFolder === f.id ? 'active' : ''}" data-folder="${f.id}">
     ${folderCheckbox}
     <span class="folder-item-name">${lockIcon ? lockIcon + ' ' : ''}${escapeHtml(f.name)} <span class="folder-count">(${count})</span></span>
-    <span class="folder-actions-left">
-      <span class="folder-move" data-moveup="${f.id}" title="위로">▲</span>
-      <span class="folder-move" data-movedown="${f.id}" title="아래로">▼</span>
-      <span class="folder-edit" data-edit="${f.id}" title="이름 수정">${ico('edit')}</span>
-      <span class="folder-lock" data-lock="${f.id}" title="비밀번호 설정">${ico('key')}</span>
-      <span class="folder-moveto" data-moveto="${f.id}" title="폴더 이동">${ico('folder-move')}</span>
-      ${dormantIcon}
-    </span>
-    <span class="folder-actions-right">
-    </span>
   </div>`;
 }
 
@@ -3379,36 +3774,32 @@ function renderFolderList() {
   }
 
   folderList.querySelectorAll('.folder-item').forEach((el) => {
-    // Long press for mobile: show action icons
+    // 진짜 폴더(전체·미분류 제외)는 우클릭(PC)·길게 누르기(휴대폰)로 폴더 관리 화면을 그 폴더에 맞춰 연다
+    const realFolder = el.dataset.folder !== '__all__' && el.dataset.folder !== '__none__';
     let longPressTimer = null;
     let didLongPress = false;
 
-    el.addEventListener('touchstart', (e) => {
-      if (selectMode) return; // 선택 모드에서는 롱프레스 비활성화
+    el.addEventListener('touchstart', () => {
+      if (selectMode || !realFolder) return; // 선택 모드에서는 롱프레스 비활성화
       didLongPress = false;
       longPressTimer = setTimeout(() => {
         didLongPress = true;
-        folderList.querySelectorAll('.folder-actions-left.show, .folder-actions-right.show').forEach((a) => a.classList.remove('show'));
-        el.querySelectorAll('.folder-actions-left, .folder-actions-right').forEach((a) => a.classList.toggle('show'));
+        openFolderManager(el.dataset.folder);
       }, 500);
     }, { passive: true });
 
-    el.addEventListener('touchend', () => { clearTimeout(longPressTimer); });
+    el.addEventListener('touchend', (e) => {
+      clearTimeout(longPressTimer);
+      // 손을 뗄 때 생기는 클릭이 방금 뜬 관리 화면의 버튼을 누르지 않게
+      if (didLongPress && e.cancelable) e.preventDefault();
+    });
     el.addEventListener('touchmove', () => { clearTimeout(longPressTimer); });
 
-    // Right-click for PC: 액션 아이콘 토글 (같은 폴더 다시 우클릭하면 닫힘)
+    // 우클릭 (안드로이드는 길게 누르기에도 이 신호가 온다 — 이미 열려 있으면 그 폴더만 다시 짚는다)
     el.addEventListener('contextmenu', (e) => {
-      if (selectMode) return;
-      const menu = el.querySelector('.folder-actions-left');
-      if (!menu) return;
+      if (selectMode || !realFolder) return;
       e.preventDefault();
-      const isOpen = menu.classList.contains('show');
-      // 다른 폴더의 열린 메뉴는 모두 닫기
-      folderList.querySelectorAll('.folder-actions-left.show, .folder-actions-right.show').forEach((a) => a.classList.remove('show'));
-      // 닫혀 있었으면 열기 / 열려 있었으면 위에서 이미 닫혔으니 그대로 둠
-      if (!isOpen) {
-        el.querySelectorAll('.folder-actions-left, .folder-actions-right').forEach((a) => a.classList.add('show'));
-      }
+      openFolderManager(el.dataset.folder);
     });
 
     el.addEventListener('click', (e) => {
@@ -3434,15 +3825,6 @@ function renderFolderList() {
         if (idx >= 0) lastCheckedFolderIndex = idx;
         return;
       }
-
-      // 액션 아이콘 클릭 (아이콘은 보일 때만 클릭되므로 .show 여부와 무관하게 처리
-      //  — PC는 마우스 오버(hover), 모바일은 길게 누르기로 아이콘이 나타남)
-      if (e.target.dataset.moveup) { moveFolderUp(e.target.dataset.moveup); return; }
-      if (e.target.dataset.movedown) { moveFolderDown(e.target.dataset.movedown); return; }
-      if (e.target.classList.contains('folder-edit')) { showRenameFolderDialog(e.target.dataset.edit); return; }
-      if (e.target.classList.contains('folder-lock')) { showSetPasswordDialog(e.target.dataset.lock); return; }
-      if (e.target.classList.contains('folder-moveto')) { showMoveFolderDialog(e.target.dataset.moveto); return; }
-      if (e.target.classList.contains('folder-dormant')) { toggleDormant(e.target.dataset.dormant); return; }
 
       const val = el.dataset.folder;
       if (val === '__all__') { currentFolder = null; }

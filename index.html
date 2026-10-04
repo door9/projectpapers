@@ -37,6 +37,9 @@
   <symbol id="i-unlock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="1.5"/><path d="M8 10.5v-3a4 4 0 0 1 7.8-1.3"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A7.5 7.5 0 1 1 9.5 4.5a6 6 0 0 0 10 10z"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2 M12 19.5v2 M2.5 12h2 M19.5 12h2 M5.3 5.3l1.4 1.4 M17.3 17.3l1.4 1.4 M5.3 18.7l1.4-1.4 M17.3 6.7l1.4-1.4"/></symbol>
+  <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7.5Q3 6 4.5 6h4.3l2 2.2h8.7Q21 8.2 21 9.7v8.8q0 1.5-1.5 1.5h-15Q3 20 3 18.5z M12 11v6 M9 14h6"/></symbol>
+  <symbol id="i-grip" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12 M18 6 6 18"/></symbol>
 </svg>
 
 <div id="app" style="display:none">
@@ -82,7 +85,10 @@
     <div id="sidebar-scroll">
       <div id="folder-dropdown" class="folder-dropdown" style="display:none">
         <div id="folder-list"></div>
-        <button class="folder-add-btn" id="btn-folder-add">+ 새 폴더</button>
+        <div class="folder-dropdown-foot">
+          <button class="folder-add-btn" id="btn-folder-add">+ 새 폴더</button>
+          <button class="folder-add-btn" id="btn-folder-manage">폴더 관리</button>
+        </div>
       </div>
       <div id="memo-list"></div>
     </div>

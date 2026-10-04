@@ -363,47 +363,9 @@ html, body {
   font-weight: 400;
 }
 
-.folder-actions-left,
-.folder-actions-right {
-  display: none;
-  align-items: center;
-  gap: 2.5px;
-  flex-shrink: 0;
-}
-.folder-actions-left { margin-left: 4px; }
-.folder-actions-right { margin-left: auto; }
-
-.folder-actions-left.show,
-.folder-actions-right.show { display: flex; }
-
 .folder-item--child {
   padding-left: 32px;
 }
-
-.folder-actions-left .folder-move {
-  font-size: 0.9rem;
-  padding: 2px 3px;
-  cursor: pointer;
-  line-height: 1;
-  color: var(--text2);
-}
-.folder-actions-left .folder-move:hover { color: var(--accent); }
-
-.folder-actions-left .folder-edit,
-.folder-actions-left .folder-lock {
-  font-size: 0.85rem;
-  padding: 2px 3px;
-  cursor: pointer;
-  line-height: 1;
-}
-.folder-actions-right .folder-del {
-  font-size: 1rem;
-  color: var(--text2);
-  padding: 2px 4px;
-  cursor: pointer;
-  line-height: 1;
-}
-.folder-actions-right .folder-del:hover { color: var(--accent); }
 
 .folder-dormant-toggle {
   display: flex;
@@ -423,14 +385,6 @@ html, body {
 
 .folder-dormant-list {
   background: var(--bg);
-}
-
-.folder-actions-left .folder-moveto,
-.folder-actions-left .folder-dormant {
-  font-size: 0.85rem;
-  padding: 2px 3px;
-  cursor: pointer;
-  line-height: 1;
 }
 
 .folder-collapse-btn {
@@ -460,6 +414,242 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 .folder-add-btn:hover { background: var(--bg2); color: var(--text); }
+.folder-dropdown-foot { display: flex; border-top: 1px solid var(--border); }
+.folder-dropdown-foot .folder-add-btn { border-top: none; flex: 1; }
+.folder-dropdown-foot #btn-folder-manage { text-align: right; }
+
+/* ── 폴더 관리 화면 (북마크 관리자식) ── */
+#folder-manager {
+  position: fixed;
+  inset: 0;
+  z-index: 90;              /* 사이드바(40)·햄버거(50) 위, 대화상자(100) 아래 */
+  background: rgba(0,0,0,0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.fm-page {
+  background: var(--card);
+  width: min(640px, calc(100vw - 32px));
+  height: min(760px, calc(100vh - 48px));
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.fm-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.fm-header h2 { font-family: 'Georgia', 'Times New Roman', serif; font-size: 1.05rem; font-weight: 700; }
+.fm-header #fm-add { flex: 0 0 auto; margin-left: auto; padding: 8px 14px; white-space: nowrap; }
+.fm-icon-btn, .fm-more {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text2);
+  cursor: pointer;
+}
+.fm-icon-btn { color: var(--text); }
+.fm-icon-btn:hover, .fm-more:hover, .fm-row.menu-open .fm-more { background: var(--bg2); color: var(--text); }
+.fm-icon-btn .ico, .fm-more .ico { width: 20px; height: 20px; }
+.fm-info { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 0.95rem; padding: 4px 6px; }
+.fm-info:hover { color: var(--accent); }
+.fm-tip {
+  padding: 10px 16px;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  color: var(--text2);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.fm-tip .ico { width: 1em; height: 1em; vertical-align: -0.12em; }
+.fm-body { flex: 1; overflow-y: auto; position: relative; padding-bottom: 24px; }
+.fm-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 16px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text2);
+}
+.fm-section-head .ico { width: 15px; height: 15px; }
+.fm-section-n { font-weight: 400; }
+.fm-section[data-section="dormant"] { border-top: 1px solid var(--border); margin-top: 10px; }
+.fm-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 10px 0 4px;
+  border-radius: 6px;
+  margin: 0 6px;
+}
+.fm-row:hover, .fm-row.menu-open { background: var(--bg); }
+.fm-row.fm-child { padding-left: 34px; }
+.fm-grip {
+  width: 26px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--border);
+  cursor: grab;
+  touch-action: none;       /* 손가락으로 끌 때 화면이 굴러가지 않게 */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.fm-row:hover .fm-grip { color: var(--text2); }
+.fm-grip .ico { width: 18px; height: 18px; }
+.fm-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+.fm-name > .ico { width: 18px; height: 18px; color: var(--text2); }
+.fm-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fm-lock { display: inline-flex; color: var(--text2); }
+.fm-lock .ico { width: 14px; height: 14px; }
+.fm-count { min-width: 26px; text-align: right; font-size: 0.75rem; color: var(--text2); flex-shrink: 0; margin-right: 6px; }
+.fm-dorm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 92px;
+  height: 32px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+  color: var(--text2);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.fm-dorm:hover { border-color: var(--accent); color: var(--accent); }
+.fm-dorm.on { background: var(--bg2); color: var(--text); }
+.fm-dorm .ico { width: 15px; height: 15px; }
+.fm-dorm-slot { width: 92px; flex-shrink: 0; }
+.fm-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  outline: none;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+}
+.fm-empty {
+  margin: 4px 16px 6px;
+  padding: 14px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text2);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+.fm-menu {
+  position: fixed;
+  z-index: 95;
+  min-width: 200px;
+  padding: 6px 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.16);
+}
+.fm-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  text-align: left;
+  cursor: pointer;
+}
+.fm-menu button:hover { background: var(--bg); }
+.fm-menu button .ico { width: 18px; height: 18px; color: var(--text2); }
+.fm-menu button.danger { color: var(--accent); border-top: 1px solid var(--bg2); margin-top: 4px; }
+.fm-menu button.danger .ico { color: var(--accent); }
+/* 끌기 */
+.fm-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 96;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--card);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.fm-ghost .ico { width: 16px; height: 16px; color: var(--text2); }
+.fm-row.fm-dragging { opacity: 0.35; }
+.fm-drop-line {
+  display: none;
+  position: absolute;
+  right: 16px;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.fm-drop-line::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.fm-row.fm-drop-into { background: var(--bg2); box-shadow: inset 0 0 0 2px var(--accent); }
+.fm-empty.fm-drop-here { border-color: var(--accent); color: var(--accent); background: var(--bg); }
+body.fm-drag-on, body.fm-drag-on * { cursor: grabbing !important; user-select: none; }
+.fm-row.fm-flash { animation: fm-flash 1.6s ease-out; }
+@keyframes fm-flash { 0%, 35% { background: #fbe3a6; } 100% { background: transparent; } }
+
+@media (max-width: 768px) {
+  #folder-manager { background: var(--card); align-items: stretch; }
+  .fm-page { width: 100%; height: 100%; border-radius: 0; box-shadow: none; }
+}
+@media (pointer: coarse) {
+  .fm-row { min-height: 52px; }
+  .fm-name { font-size: 0.98rem; }
+  .fm-grip { width: 34px; height: 44px; color: var(--text2); }
+}
 
 /* Memo list */
 /* 폴더 영역 + 노트 영역을 하나의 스크롤로 통합 */
