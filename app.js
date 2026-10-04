@@ -2833,10 +2833,8 @@ async function loadMemoInEditor(memo) {
   }
   offlineCopyId = null;
   currentId = memo.id;
-  // 폴더에 속한 노트를 열면 사이드바 폴더 선택도 그 폴더로 동기화 (잠긴 폴더는 제외)
-  if (memo.folder && folders.some((f) => f.id === memo.folder) && !isFolderLocked(memo.folder)) {
-    currentFolder = memo.folder;
-  }
+  // 글을 열어도 사이드바 폴더 선택은 그대로 둔다 — '전체'에서 열면 전체 목록, 특정 폴더에서 열면 그 폴더 목록이 유지된다
+  // (예전엔 글이 속한 폴더로 바뀌어, 전체 목록을 보다 글을 고르면 목록이 갑자기 그 폴더 글로 줄어들었다)
   showEditor(memo);
   renderMemoList();
   renderFolderList();
