@@ -1,14 +1,14 @@
 // ── 저장 칸·Dropbox 위치·동기화 방식 ──
-// ?pilot        시범 운전: 글 단위 동기화를 진짜 메모와 따로 돌린다
+// ?pilot        시범 운전 칸: 진짜 메모와 따로 돌린다
 //               (기기 저장은 'pilot:' 칸, Dropbox 는 /project-papers-pilot. 로그인만 함께 쓴다)
-// ?ns=이름&split=1  시험용 — 이 컴퓨터(localhost)에서만. 한 브라우저 안에서 여러 기기를 흉내 낸다
+// ?ns=이름&split=1  시험용 — 이 컴퓨터(localhost)에서만. 한 브라우저 안에서 여러 기기를 흉내 낸다(split 없으면 옛 한 파일 방식)
 const PAGE_PARAMS = new URLSearchParams(location.search);
 const IS_LOCAL_TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const PILOT = PAGE_PARAMS.has('pilot');
 const TEST_NS = IS_LOCAL_TEST ? PAGE_PARAMS.get('ns') : null;
 const STORE_NS = PILOT ? 'pilot:' : TEST_NS ? TEST_NS + ':' : '';
-// 글 단위 동기화(sync-split.js). 시범 운전이 끝나면 모두 켠다
-const SPLIT_SYNC = PILOT || (TEST_NS != null && PAGE_PARAMS.get('split') === '1');
+// 글 단위 동기화(sync-split.js) — 2026-10-04 전환. 옛 한 파일 방식은 옮겨 올 때와 시험에서만 쓴다
+const SPLIT_SYNC = TEST_NS != null ? PAGE_PARAMS.get('split') === '1' : true;
 const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh']);   // 로그인은 칸과 상관없이 하나
 const store = {
   key: (k) => (SHARED_KEYS.has(k) ? k : STORE_NS + k),
@@ -807,6 +807,7 @@ async function performAutoBackup(today) {
     showToast('자동 백업 완료');
   } catch (e) {
     console.error('Auto backup error:', e);
+    showToast('자동 백업 실패 — 다음에 앱을 열 때 다시 합니다');
   }
 }
 

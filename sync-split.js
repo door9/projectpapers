@@ -480,6 +480,9 @@ async function freezeLegacy() {
 
 // ── 백업 = Dropbox 서버 안에서 sync/ 폴더를 통째로 복사 (휴대폰 데이터를 쓰지 않는다) ──
 async function splitBackup(name) {
+  // 백업 폴더가 아직 없으면 먼저 만든다(이미 있으면 409 — 괜찮다)
+  const mk = await dbxRpc('files/create_folder_v2', { path: BACKUP_DIR, autorename: false });
+  if (!mk.ok && mk.status !== 409) throw new Error('backup folder failed: ' + mk.status);
   const r = await dbxRpc('files/copy_v2', { from_path: SPLIT_DIR, to_path: BACKUP_DIR + '/' + name, autorename: false });
-  if (!r.ok) throw new Error('backup copy failed: ' + r.status);
+  if (!r.ok) throw new Error('backup copy failed: ' + r.status + ' ' + JSON.stringify(r.data || '').slice(0, 120));
 }
