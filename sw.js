@@ -1,9 +1,10 @@
-const CACHE_NAME = 'memo-v152';
+const CACHE_NAME = 'memo-v153';
 const ASSETS = [
   '/project-papers/',
   '/project-papers/index.html',
   '/project-papers/style.css',
   '/project-papers/app.js',
+  '/project-papers/sync-split.js',
   '/project-papers/manifest.json',
   '/project-papers/favicon.svg',
   '/project-papers/icon-192.png',

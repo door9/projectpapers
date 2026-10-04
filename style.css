@@ -712,6 +712,16 @@ html, body {
 .fm-row.fm-drop-into { background: var(--bg2); box-shadow: inset 0 0 0 2px var(--accent); }
 .fm-empty.fm-drop-here { border-color: var(--accent); color: var(--accent); background: var(--bg); }
 body.fm-drag-on, body.fm-drag-on * { cursor: grabbing !important; user-select: none; }
+#pilot-badge {
+  margin: 0 auto 0 6px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
 .fm-row.fm-flash { animation: fm-flash 1.6s ease-out; }
 @keyframes fm-flash { 0%, 35% { background: #fbe3a6; } 100% { background: transparent; } }
 

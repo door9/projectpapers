@@ -1,7 +1,36 @@
+// ── 저장 칸·Dropbox 위치·동기화 방식 ──
+// ?pilot        시범 운전: 글 단위 동기화를 진짜 메모와 따로 돌린다
+//               (기기 저장은 'pilot:' 칸, Dropbox 는 /project-papers-pilot. 로그인만 함께 쓴다)
+// ?ns=이름&split=1  시험용 — 이 컴퓨터(localhost)에서만. 한 브라우저 안에서 여러 기기를 흉내 낸다
+const PAGE_PARAMS = new URLSearchParams(location.search);
+const IS_LOCAL_TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+const PILOT = PAGE_PARAMS.has('pilot');
+const TEST_NS = IS_LOCAL_TEST ? PAGE_PARAMS.get('ns') : null;
+const STORE_NS = PILOT ? 'pilot:' : TEST_NS ? TEST_NS + ':' : '';
+// 글 단위 동기화(sync-split.js). 시범 운전이 끝나면 모두 켠다
+const SPLIT_SYNC = PILOT || (TEST_NS != null && PAGE_PARAMS.get('split') === '1');
+const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh']);   // 로그인은 칸과 상관없이 하나
+const store = {
+  key: (k) => (SHARED_KEYS.has(k) ? k : STORE_NS + k),
+  getItem: (k) => window.localStorage.getItem(store.key(k)),
+  setItem: (k, v) => window.localStorage.setItem(store.key(k), v),
+  removeItem: (k) => window.localStorage.removeItem(store.key(k)),
+  // 다른 창의 저장 신호(storage 이벤트)의 키 → 이 칸에서의 이름. 다른 칸 것이면 null
+  nameOf: (raw) => {
+    if (raw == null) return null;
+    if (SHARED_KEYS.has(raw)) return raw;
+    if (!STORE_NS) return raw.includes(':') ? null : raw;
+    return raw.startsWith(STORE_NS) ? raw.slice(STORE_NS.length) : null;
+  },
+};
+// 시범·시험 창에서 새 창을 열 때도 같은 칸을 쓰게 주소 꼬리를 이어 붙인다
+const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
+const DBX_ROOT = PILOT ? '/project-papers-pilot' : '/project-papers';
+
 // ── Config ──
 const DROPBOX_CLIENT_ID = '0kfnwj8hluxzpun';
 // PKCE(공개 클라이언트) 방식이므로 app secret은 코드에 두지 않는다 (공개 저장소 노출 방지)
-const DROPBOX_FILE = '/project-papers/memos.json';
+const DROPBOX_FILE = DBX_ROOT + '/memos.json';
 // 동기화 규칙 버전. 옛 앱이 새 규칙의 데이터를 망가뜨릴 수 있게 바뀔 때만 올린다.
 // 파일의 dataVersion이 이 값보다 크면 이 앱은 올리지 않고 새로고침을 안내한다.
 // 3: 글 버전을 시각이 아니라 내용 지문(ver)·계보(anc)로 가린다 — 시각만 보는 옛 앱이 되돌리지 못하게
@@ -17,7 +46,7 @@ function markOutdated() {
     setTimeout(() => location.reload(), 1500);
   }
 }
-const BACKUP_DIR = '/project-papers/backups';
+const BACKUP_DIR = DBX_ROOT + '/backups';
 const BACKUP_MAX = 30;
 const REDIRECT_URI = location.origin + location.pathname;
 
@@ -28,8 +57,8 @@ let trash = []; // 휴지통: { type: 'memo'|'folder', data: {...}, deletedAt: t
 let deletedIds = []; // 영구 삭제된 항목: { id, at } (동기화 시 복귀 차단, 30일 후 자동 정리)
 let currentId = null;
 let currentFolder = null; // null = all
-let accessToken = localStorage.getItem('dbx_token') || null;
-let refreshToken = localStorage.getItem('dbx_refresh') || null;
+let accessToken = store.getItem('dbx_token') || null;
+let refreshToken = store.getItem('dbx_refresh') || null;
 let isOnline = !!accessToken;
 let viewerMode = false;
 let favFilterActive = false;
@@ -45,13 +74,13 @@ let saveTimer = null;
 // 못 보낸 변경이 있는지(pending_sync), Dropbox 파일 버전(rev), 지난 동기화 때의 각 글 시각(sync_base)
 let lastPullAt = 0;
 let localSaveTimer = null;
-const getRev = () => localStorage.getItem('dbx_rev') || null;
-const getSyncBase = () => { try { return JSON.parse(localStorage.getItem('sync_base') || '{}'); } catch { return {}; } };
-const isDirty = () => localStorage.getItem('pending_sync') === '1';
+const getRev = () => store.getItem('dbx_rev') || null;
+const getSyncBase = () => { try { return JSON.parse(store.getItem('sync_base') || '{}'); } catch { return {}; } };
+const isDirty = () => store.getItem('pending_sync') === '1';
 let changeSeq = 0;   // 이 기기에서 고칠 때마다 1씩 — 올리는 동안 또 고쳤는지 가린다
 let reloadingForUpdate = false;
 function setRev(rev) {
-  if (rev) localStorage.setItem('dbx_rev', rev); else localStorage.removeItem('dbx_rev');
+  if (rev) store.setItem('dbx_rev', rev); else store.removeItem('dbx_rev');
 }
 
 // 동기화 작업은 한 번에 하나씩 — 받기·올리기가 겹치면 같은 버전으로 두 번 올리다 충돌한다
@@ -384,7 +413,7 @@ async function handleOAuthCallback() {
     if (token && hState === sessionStorage.getItem('oauth_state')) {
       accessToken = token;
       isOnline = true;
-      localStorage.setItem('dbx_token', token);
+      store.setItem('dbx_token', token);
       sessionStorage.removeItem('oauth_state');
       history.replaceState(null, '', location.pathname);
     }
@@ -410,8 +439,8 @@ async function handleOAuthCallback() {
     accessToken = data.access_token;
     refreshToken = data.refresh_token || null;
     isOnline = true;
-    localStorage.setItem('dbx_token', accessToken);
-    if (refreshToken) localStorage.setItem('dbx_refresh', refreshToken);
+    store.setItem('dbx_token', accessToken);
+    if (refreshToken) store.setItem('dbx_refresh', refreshToken);
     sessionStorage.removeItem('oauth_state');
     sessionStorage.removeItem('code_verifier');
     history.replaceState(null, '', location.pathname);
@@ -441,7 +470,7 @@ async function refreshAccessToken() {
     if (!res.ok) throw new Error('token refresh failed: ' + res.status);
     const data = await res.json();
     accessToken = data.access_token;
-    localStorage.setItem('dbx_token', accessToken);
+    store.setItem('dbx_token', accessToken);
     return true;
   } catch (e) {
     // 통신이 잠깐 끊긴 것 — 로그아웃하지 않는다(예전엔 지하철 등에서 로그아웃되고 '(Offline Work)' 사본이 생겼다)
@@ -454,8 +483,8 @@ function logout() {
   accessToken = null;
   refreshToken = null;
   isOnline = false;
-  localStorage.removeItem('dbx_token');
-  localStorage.removeItem('dbx_refresh');
+  store.removeItem('dbx_token');
+  store.removeItem('dbx_refresh');
   location.reload();
 }
 
@@ -607,12 +636,17 @@ async function createBackup() {
       + '_' + String(now.getHours()).padStart(2, '0')
       + String(now.getMinutes()).padStart(2, '0')
       + String(now.getSeconds()).padStart(2, '0');
-    const backupPath = BACKUP_DIR + '/backup_' + ts + '.json';
-    const obj = backupPayload();
-    const data = JSON.stringify(obj, null, 2);
-
-    // 백업 파일 업로드
-    await dbxUploadTo(backupPath, data);
+    if (SPLIT_SYNC) {
+      // 글 단위: 못 보낸 변경을 먼저 올린 뒤 Dropbox 서버 안에서 sync/ 를 통째로 복사(휴대폰 데이터를 쓰지 않는다)
+      await syncToDropboxIfDirty();
+      await splitBackup('backup_' + ts);
+    } else {
+      const backupPath = BACKUP_DIR + '/backup_' + ts + '.json';
+      const obj = backupPayload();
+      const data = JSON.stringify(obj, null, 2);
+      // 백업 파일 업로드
+      await dbxUploadTo(backupPath, data);
+    }
 
     // 기존 백업 파일 목록 조회 후 오래된 것 삭제
     await pruneBackups();
@@ -694,7 +728,7 @@ async function dbxDelete(path, retried, attempt = 0) {
 async function pruneBackups() {
   const entries = await dbxListFolder(BACKUP_DIR);
   const backups = entries
-    .filter((e) => e['.tag'] === 'file' && e.name.startsWith('backup_'))
+    .filter((e) => (e['.tag'] === 'file' || e['.tag'] === 'folder') && e.name.startsWith('backup_'))
     .sort((a, b) => a.name.localeCompare(b.name));
 
   // 30개 초과 시 오래된 것부터 삭제
@@ -714,16 +748,16 @@ function getTodayKST() {
 
 function markAutoBackupPending() {
   const today = getTodayKST();
-  const lastDate = localStorage.getItem('auto_backup_date');
+  const lastDate = store.getItem('auto_backup_date');
   if (lastDate !== today) {
-    localStorage.setItem('auto_backup_pending', 'true');
+    store.setItem('auto_backup_pending', 'true');
   }
 }
 
 async function checkAutoBackup() {
   if (!accessToken) return;
   const today = getTodayKST();
-  const lastDate = localStorage.getItem('auto_backup_date');
+  const lastDate = store.getItem('auto_backup_date');
   if (lastDate === today) return; // 오늘 이미 백업함
 
   // Dropbox에 오늘 날짜 자동 백업 파일이 있는지 확인
@@ -731,10 +765,10 @@ async function checkAutoBackup() {
     const entries = await dbxListFolder(BACKUP_DIR);
     const todayTag = today.replace(/-/g, '');
     const alreadyExists = entries.some((e) =>
-      e['.tag'] === 'file' && e.name.includes(todayTag) && e.name.includes('(auto backup)')
+      (e['.tag'] === 'file' || e['.tag'] === 'folder') && e.name.includes(todayTag) && e.name.includes('(auto backup)')
     );
     if (alreadyExists) {
-      localStorage.setItem('auto_backup_date', today);
+      store.setItem('auto_backup_date', today);
       return;
     }
     await performAutoBackup(today);
@@ -745,9 +779,9 @@ async function checkAutoBackup() {
 
 async function checkAutoBackupPending() {
   if (!accessToken) return;
-  const pending = localStorage.getItem('auto_backup_pending');
+  const pending = store.getItem('auto_backup_pending');
   if (pending !== 'true') return;
-  localStorage.removeItem('auto_backup_pending');
+  store.removeItem('auto_backup_pending');
   await checkAutoBackup();
 }
 
@@ -760,13 +794,16 @@ async function performAutoBackup(today) {
       + '_' + String(now.getHours()).padStart(2, '0')
       + String(now.getMinutes()).padStart(2, '0')
       + String(now.getSeconds()).padStart(2, '0');
-    const backupPath = BACKUP_DIR + '/backup_' + ts + ' (auto backup).json';
-    const obj = backupPayload();
-    const data = JSON.stringify(obj, null, 2);
-
-    await dbxUploadTo(backupPath, data);
+    if (SPLIT_SYNC) {
+      await splitBackup('backup_' + ts + ' (auto backup)');
+    } else {
+      const backupPath = BACKUP_DIR + '/backup_' + ts + ' (auto backup).json';
+      const obj = backupPayload();
+      const data = JSON.stringify(obj, null, 2);
+      await dbxUploadTo(backupPath, data);
+    }
     await pruneBackups();
-    localStorage.setItem('auto_backup_date', today);
+    store.setItem('auto_backup_date', today);
     showToast('자동 백업 완료');
   } catch (e) {
     console.error('Auto backup error:', e);
@@ -919,7 +956,7 @@ function baseSnapshot(list) {
 function syncedAndUnchanged(item, key, base) {
   const b = baseOf(base || getSyncBase(), key);
   if (b.t != null || b.h) return sameAsBase(item, b);
-  const last = Number(localStorage.getItem('last_synced_at')) || 0;
+  const last = Number(store.getItem('last_synced_at')) || 0;
   return last > 0 && (item.updatedAt || 0) > 0 && (item.updatedAt || 0) <= last;
 }
 
@@ -952,7 +989,11 @@ function retireGoneItems(remote) {
 
 // 원격 파일을 받아 이 기기 내용과 합친다 (올리지는 않는다). 파일이 없으면 true를 돌려준다.
 // 합친 결과가 원격과 다르면 '보낼 것 있음'으로, 같으면 '동기화됨'으로 표시한다.
-async function pullAndMerge() {
+function pullAndMerge() {
+  return SPLIT_SYNC ? splitPull() : legacyPullAndMerge();
+}
+
+async function legacyPullAndMerge() {
   lastPullAt = Date.now();
   // 받기 전에 '바뀌었나'만 먼저 묻는다(Evernote 의 변경 번호와 같은 발상).
   // 지난번에 받거나 올린 버전 그대로면 다른 기기가 고친 것이 없으므로 0.9MB 파일을 받지 않는다.
@@ -965,7 +1006,8 @@ async function pullAndMerge() {
   const remote = await dbxDownload();
   if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
     // 이 앱보다 새 규칙으로 쓰인 파일이면 올리지 않는다(옛 화면이 새 데이터를 망가뜨리지 않게)
-    if ((remote.dataVersion || 0) > DATA_VERSION) markOutdated();
+    // 글 단위로 옮겨 간 파일(dataVersion 4)은 글 단위 앱에겐 '옛 사본'일 뿐이다
+    if ((remote.dataVersion || 0) > DATA_VERSION && !SPLIT_SYNC) markOutdated();
     retireGoneItems(remote);
     if (Array.isArray(remote.deletedIds)) deletedIds = mergeDeletedIds(deletedIds, remote.deletedIds);
     if (Array.isArray(remote.trash)) trash = mergeTrash(trash, remote.trash);
@@ -983,7 +1025,7 @@ async function pullAndMerge() {
   reconcileTrash();
   saveLocalData(false);
   if (sameAsRemote(remote)) markSynced();
-  else localStorage.setItem('pending_sync', '1');
+  else store.setItem('pending_sync', '1');
   // 합친 즉시 편집기에도 반영한다 — 글은 바뀌었는데 편집기에 옛 내용이 남아 있으면,
   // 그 위에 한 글자만 쳐도 옛 내용이 '방금 고친 최신'으로 올라간다(예전엔 올리기가 끝난 뒤에야 반영했다)
   refreshOpenMemo();
@@ -1044,6 +1086,7 @@ function syncToDropbox(force) {
 }
 
 async function uploadNow(force, retriedConflict) {
+  if (SPLIT_SYNC) return splitPush(force, retriedConflict);
   if (!accessToken || outdatedClient) return;
   // 안전장치: 빈 내용으로 Dropbox 파일을 덮어쓰지 않는다.
   // (경로가 어긋나거나 로그인 직후 아직 못 받아온 상태에서 올리면 원격 노트가 날아간다)
@@ -1179,50 +1222,50 @@ function fmtFullTime(ts) {
 function updateSaveSyncTimes() {
   const savedEl = $('#last-saved-time');
   const syncedEl = $('#last-synced-time');
-  if (savedEl) savedEl.textContent = '최근 저장 ' + fmtFullTime(localStorage.getItem('last_saved_at'));
-  if (syncedEl) syncedEl.textContent = '최근 동기화 ' + fmtFullTime(localStorage.getItem('last_synced_at'));
+  if (savedEl) savedEl.textContent = '최근 저장 ' + fmtFullTime(store.getItem('last_saved_at'));
+  if (syncedEl) syncedEl.textContent = '최근 동기화 ' + fmtFullTime(store.getItem('last_synced_at'));
 }
 
 // base: 원격과 같아진 상태(올린 그 순간의 상태). 없으면 지금 상태. clean=false면 그 뒤 고친 게 있어 '보낼 것'을 남긴다
 function markSynced(base, clean = true) {
-  localStorage.setItem('last_synced_at', String(Date.now()));
-  localStorage.setItem('pending_sync', clean ? '0' : '1');
+  store.setItem('last_synced_at', String(Date.now()));
+  store.setItem('pending_sync', clean ? '0' : '1');
   if (clean) pendingSince = 0;
   // 원격과 같아진 내용을 다음 합치기의 기준점으로 삼는다
-  localStorage.setItem('sync_base', JSON.stringify(base || baseSnapshot(syncableMemos())));
+  store.setItem('sync_base', JSON.stringify(base || baseSnapshot(syncableMemos())));
   updateSaveSyncTimes();
 }
 
 function saveLocalData(changed = true) {
   clearTimeout(localSaveTimer);
   localSaveTimer = null;
-  localStorage.setItem('memos', JSON.stringify(memos));
-  localStorage.setItem('folders', JSON.stringify(folders));
-  localStorage.setItem('trash', JSON.stringify(trash));
-  localStorage.setItem('deletedIds', JSON.stringify(deletedIds));
-  localStorage.setItem('templates', JSON.stringify(templates));
-  if (masterPasswordHash) localStorage.setItem('master_pw', masterPasswordHash);
-  else localStorage.removeItem('master_pw');
-  localStorage.setItem('master_pw_at', String(masterPasswordAt || 0));
-  localStorage.setItem('last_saved_at', String(Date.now()));
-  if (changed) { localStorage.setItem('pending_sync', '1'); changeSeq++; }   // 아직 클라우드로 못 보낸 변경이 있다
+  store.setItem('memos', JSON.stringify(memos));
+  store.setItem('folders', JSON.stringify(folders));
+  store.setItem('trash', JSON.stringify(trash));
+  store.setItem('deletedIds', JSON.stringify(deletedIds));
+  store.setItem('templates', JSON.stringify(templates));
+  if (masterPasswordHash) store.setItem('master_pw', masterPasswordHash);
+  else store.removeItem('master_pw');
+  store.setItem('master_pw_at', String(masterPasswordAt || 0));
+  store.setItem('last_saved_at', String(Date.now()));
+  if (changed) { store.setItem('pending_sync', '1'); changeSeq++; }   // 아직 클라우드로 못 보낸 변경이 있다
   updateSaveSyncTimes();
 }
 
 function loadLocalData() {
   try {
-    const md = localStorage.getItem('memos');
+    const md = store.getItem('memos');
     if (md) memos = JSON.parse(md);
-    const fd = localStorage.getItem('folders');
+    const fd = store.getItem('folders');
     if (fd) folders = JSON.parse(fd);
-    const td = localStorage.getItem('trash');
+    const td = store.getItem('trash');
     if (td) trash = JSON.parse(td);
-    const dd = localStorage.getItem('deletedIds');
+    const dd = store.getItem('deletedIds');
     if (dd) deletedIds = JSON.parse(dd);
-    const tp = localStorage.getItem('templates');
+    const tp = store.getItem('templates');
     if (tp) templates = JSON.parse(tp);
-    masterPasswordHash = localStorage.getItem('master_pw') || null;
-    masterPasswordAt = Number(localStorage.getItem('master_pw_at')) || 0;
+    masterPasswordHash = store.getItem('master_pw') || null;
+    masterPasswordAt = Number(store.getItem('master_pw_at')) || 0;
     // 마이그레이션: sortOrder 없는 폴더에 순번 부여
     folders.forEach((f, i) => { if (f.sortOrder === undefined) f.sortOrder = i; });
   } catch {}
@@ -2670,8 +2713,9 @@ function updateFavButton(memo) {
 // 다른 창(같은 기기)에서 localStorage가 바뀌면 호출 → 이 창을 최신 상태로 갱신
 // (A창에서 수정 → B창이 즉시 반영. 단, 이 창에서 직접 입력 중이면 본문은 건드리지 않음)
 function onExternalStorageChange(e) {
-  if (e.key === 'last_saved_at' || e.key === 'last_synced_at') { updateSaveSyncTimes(); return; }
-  if (e.key !== 'memos') return; // saveLocalData는 항상 memos를 함께 저장하므로 이 키만 보면 됨
+  const key = store.nameOf(e.key);   // 다른 칸(시범 운전 등)의 신호는 무시
+  if (key === 'last_saved_at' || key === 'last_synced_at') { updateSaveSyncTimes(); return; }
+  if (key !== 'memos') return; // saveLocalData는 항상 memos를 함께 저장하므로 이 키만 보면 됨
   loadLocalData();
   renderAll();
   updateSaveSyncTimes();
@@ -3027,9 +3071,10 @@ function saveNow() {
 //  · 쉬지 않고 오래 쓰면(90초 넘게 못 보냄) 쉬지 않아도 올린다.
 //  · 앱을 벗어날 때(flushSave)·다른 글을 열 때·PC 창을 떠날 때·Ctrl+S·동기화 단추는 기다리지 않고 바로 올린다.
 // 기기 안 저장은 지금처럼 바로 하므로, 올리기가 늦어져도 글을 잃지 않는다.
-const SYNC_IDLE_MS = 10000;
-const SYNC_MIN_GAP_MS = 30000;
-const SYNC_MAX_WAIT_MS = 90000;
+// 글 단위 동기화는 한 번에 몇 KB 라 더 촘촘하게(3초 쉼, 10초 간격, 60초 최대 대기)
+const SYNC_IDLE_MS = SPLIT_SYNC ? 3000 : 10000;
+const SYNC_MIN_GAP_MS = SPLIT_SYNC ? 10000 : 30000;
+const SYNC_MAX_WAIT_MS = SPLIT_SYNC ? 60000 : 90000;
 let syncTimer = null;
 let lastUploadAt = 0;     // 마지막으로 올린 시각
 let pendingSince = 0;     // 아직 못 보낸 변경이 처음 생긴 시각
@@ -4338,13 +4383,23 @@ function renderMemoList() {
       clearTimeout(clickTimer);
       clickTimer = null;
       const id = el.dataset.id;
-      window.open(location.pathname + '?memo=' + id, '_blank', 'width=400,height=700');
+      window.open(location.pathname + '?memo=' + id + MODE_QUERY, '_blank', 'width=400,height=700');
     });
   });
 }
 
 // ── UI Helpers ──
 function showApp() {
+  // 시범 운전 표시 — 진짜 메모와 헷갈리지 않게
+  if (PILOT && !$('#pilot-badge')) {
+    const b = document.createElement('span');
+    b.id = 'pilot-badge';
+    b.textContent = '시범 운전';
+    b.title = '새 동기화 방식 시험 중 — 진짜 메모와 따로 저장됩니다';
+    const h1 = $('#sidebar-header h1');
+    h1.insertBefore(b, h1.querySelector('span'));
+    document.title = 'Project Papers (시범 운전)';
+  }
   loginScreen.style.display = 'none';
   app.style.display = 'flex';
   renderAll();
