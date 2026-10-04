@@ -1644,7 +1644,7 @@ function applyFolderMove(plan) {
 
 // ── 폴더 관리 화면 (크롬 북마크 관리자처럼 한 화면에서) ──
 // 사이드바 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'로 연다.
-// 줄마다 버튼이 늘 보인다: 휴면(최상위만) · ⋮(열기·이름 바꾸기·하위 폴더·옮기기·비밀번호·삭제).
+// 줄 끝 ⋮ 하나에 모든 기능: 열기·이름 바꾸기·하위 폴더·옮기기·비밀번호·휴면(최상위만)·삭제.
 // 왼쪽 손잡이를 끌어 순서를 바꾸고, 다른 폴더 위에 놓으면 그 하위로, 휴면 칸에 놓으면 휴면이 된다.
 let fm = null;   // 열려 있을 때 { el, body, editing, creating, menu, drag, openedAt }
 
@@ -1731,20 +1731,16 @@ function fmSections() {
   return { active, dormant, stray };
 }
 
-function fmRowHtml(f, kind, dormant) {
+function fmRowHtml(f, kind) {
   // kind: 'top' | 'child' | 'stray'
   const count = kind === 'top' ? getFolderMemoCount(f.id) : memos.filter((m) => m.folder === f.id && isVisibleMemo(m)).length;
   const name = fm.editing === f.id
     ? `<input class="fm-input" value="${escapeHtml(f.name)}" maxlength="60" aria-label="폴더 이름">`
     : `<span class="fm-name-text">${escapeHtml(f.name)}</span>${f.password ? `<span class="fm-lock" title="비밀번호 걸림">${ico('lock')}</span>` : ''}`;
-  const dorm = kind === 'top'
-    ? `<button class="fm-dorm${dormant ? ' on' : ''}" data-act="dormant" type="button">${ico(dormant ? 'sun' : 'moon')}<span>${dormant ? '휴면 해제' : '휴면'}</span></button>`
-    : '<span class="fm-dorm-slot"></span>';
   return `<div class="fm-row${kind === 'child' ? ' fm-child' : ''}" data-id="${f.id}" data-parent="${kind === 'child' ? f.parentId : ''}"${kind === 'stray' ? ' data-stray="1"' : ''}>
     <span class="fm-grip" title="끌어서 옮기기">${ico('grip')}</span>
     <span class="fm-name">${ico('folder')}${name}</span>
     <span class="fm-count">${count}</span>
-    ${dorm}
     <button class="fm-more" data-act="menu" type="button" title="더보기">${ico('more')}</button>
   </div>`;
 }
@@ -1769,14 +1765,14 @@ function renderFolderManager(force) {
   if (oldInput) oldInput._done = true;   // 지워지는 입력칸의 blur 가 새 입력칸 값으로 저장하지 않게
   const { active, dormant, stray } = fmSections();
   const creating = fm.creating;
-  const blocks = (list, isDormant) => list.map(({ top, children }) =>
-    fmRowHtml(top, 'top', isDormant) +
-    children.map((c) => fmRowHtml(c, 'child', isDormant)).join('') +
+  const blocks = (list) => list.map(({ top, children }) =>
+    fmRowHtml(top, 'top') +
+    children.map((c) => fmRowHtml(c, 'child')).join('') +
     (creating && creating.parentId === top.id ? fmNewRowHtml(true) : '')
   ).join('');
-  const activeHtml = blocks(active, false) + stray.map((f) => fmRowHtml(f, 'stray', false)).join('') +
+  const activeHtml = blocks(active) + stray.map((f) => fmRowHtml(f, 'stray')).join('') +
     (creating && !creating.parentId ? fmNewRowHtml(false) : '');
-  const dormantHtml = blocks(dormant, true);
+  const dormantHtml = blocks(dormant);
   const nActive = active.length + active.reduce((n, b) => n + b.children.length, 0) + stray.length;
   const nDormant = dormant.length + dormant.reduce((n, b) => n + b.children.length, 0);
   const scroll = fm.body.scrollTop;
@@ -1821,8 +1817,7 @@ function onFmBodyClick(e) {
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   const id = btn.closest('.fm-row').dataset.id;
-  if (btn.dataset.act === 'dormant') toggleDormant(id);
-  else if (btn.dataset.act === 'menu') {
+  if (btn.dataset.act === 'menu') {
     if (fm.menu && fm.menu.id === id) closeFmMenu(); else openFmMenu(id, btn);
   }
 }
@@ -1839,6 +1834,7 @@ function openFmMenu(id, anchor) {
     isTop ? ['child', 'folder-plus', '하위 폴더 만들기'] : null,
     ['move', 'folder-move', '다른 폴더로 옮기기'],
     ['password', f.password ? 'lock' : 'key', f.password ? '비밀번호 바꾸기·풀기' : '비밀번호 걸기'],
+    isTop ? ['dormant', f.dormant ? 'sun' : 'moon', f.dormant ? '휴면 해제' : '휴면 처리'] : null,
     ['delete', 'trash', '삭제'],
   ].filter(Boolean);
   const menu = document.createElement('div');
@@ -1876,6 +1872,7 @@ function runFmAction(act, id) {
   else if (act === 'child') startFmCreate(id);
   else if (act === 'move') showMoveFolderDialog(id);
   else if (act === 'password') showSetPasswordDialog(id);
+  else if (act === 'dormant') toggleDormant(id);
   else if (act === 'delete') confirmDeleteFolder(id);
 }
 

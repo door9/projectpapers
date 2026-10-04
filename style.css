@@ -529,26 +529,6 @@ html, body {
 .fm-lock { display: inline-flex; color: var(--text2); }
 .fm-lock .ico { width: 14px; height: 14px; }
 .fm-count { min-width: 26px; text-align: right; font-size: 0.75rem; color: var(--text2); flex-shrink: 0; margin-right: 6px; }
-.fm-dorm {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  width: 92px;
-  height: 32px;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: var(--card);
-  color: var(--text2);
-  font: inherit;
-  font-size: 0.78rem;
-  cursor: pointer;
-}
-.fm-dorm:hover { border-color: var(--accent); color: var(--accent); }
-.fm-dorm.on { background: var(--bg2); color: var(--text); }
-.fm-dorm .ico { width: 15px; height: 15px; }
-.fm-dorm-slot { width: 92px; flex-shrink: 0; }
 .fm-input {
   flex: 1;
   min-width: 0;
