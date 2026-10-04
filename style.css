@@ -446,6 +446,7 @@ html, body {
   padding: 10px 14px 10px 8px;
   border-bottom: 1px solid var(--border);
 }
+#folder-manager [hidden] { display: none !important; }
 .fm-header h2 { font-family: 'Georgia', 'Times New Roman', serif; font-size: 1.05rem; font-weight: 700; }
 .fm-header #fm-add { flex: 0 0 auto; margin-left: auto; padding: 8px 14px; white-space: nowrap; }
 .fm-icon-btn, .fm-more {
@@ -466,6 +467,41 @@ html, body {
 .fm-icon-btn .ico, .fm-more .ico { width: 20px; height: 20px; }
 .fm-info { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 0.95rem; padding: 4px 6px; }
 .fm-info:hover { color: var(--accent); }
+/* 체크한 폴더가 있으면 머리줄 대신 나오는 막대 */
+.fm-selbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 10px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.fm-sel-n { margin-right: auto; font-size: 0.92rem; font-weight: 600; white-space: nowrap; }
+.fm-sel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 12px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.fm-sel-btn:hover { background: var(--bg2); }
+.fm-sel-btn .ico { width: 16px; height: 16px; }
+.fm-sel-btn.danger { color: var(--accent); border-color: var(--accent); }
+/* 좁은 휴대폰: 단추 셋이 한 줄에 들어가게 아이콘을 빼고 좁힌다 */
+@media (max-width: 420px) {
+  .fm-selbar { gap: 4px; padding-right: 10px; }
+  .fm-sel-btn { padding: 0 10px; }
+  .fm-sel-btn .ico { display: none; }
+}
 .fm-tip {
   padding: 10px 16px;
   font-size: 0.78rem;
@@ -496,9 +532,23 @@ html, body {
   padding: 0 10px 0 4px;
   border-radius: 6px;
   margin: 0 6px;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .fm-row:hover, .fm-row.menu-open { background: var(--bg); }
-.fm-row.fm-child { padding-left: 34px; }
+.fm-row.selected { background: #f9e4ea; }
+/* 체크박스는 한 줄로 맞추고, 하위 폴더는 손잡이부터 들여 쓴다 */
+.fm-row.fm-child .fm-grip { margin-left: 28px; }
+.fm-check {
+  width: 32px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.fm-check input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
 .fm-grip {
   width: 26px;
   height: 36px;
@@ -530,6 +580,8 @@ html, body {
 .fm-lock .ico { width: 14px; height: 14px; }
 .fm-count { min-width: 26px; text-align: right; font-size: 0.75rem; color: var(--text2); flex-shrink: 0; margin-right: 6px; }
 .fm-input {
+  -webkit-user-select: text;
+  user-select: text;
   flex: 1;
   min-width: 0;
   padding: 6px 8px;
@@ -627,6 +679,8 @@ body.fm-drag-on, body.fm-drag-on * { cursor: grabbing !important; user-select: n
 }
 @media (pointer: coarse) {
   .fm-row { min-height: 52px; }
+  .fm-check { width: 40px; height: 44px; }
+  .fm-check input { width: 20px; height: 20px; }
   .fm-name { font-size: 0.98rem; }
   .fm-grip { width: 34px; height: 44px; color: var(--text2); }
 }

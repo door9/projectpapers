@@ -1540,19 +1540,27 @@ function showMoveFolderDialog(id) {
 }
 
 function confirmDeleteFolder(id) {
-  const folder = folders.find((f) => f.id === id);
-  if (!folder) return;
-  const name = escapeHtml(folder.name);
-  const childFolders = getChildFolders(id);
-  const allIds = [id, ...childFolders.map((f) => f.id)];
-  const folderMemos = memos.filter((m) => allIds.includes(m.folder));
-  const childNote = childFolders.length > 0 ? '하위 폴더 ' + childFolders.length + '개, ' : '';
-  const detailNote = (folderMemos.length > 0 || childFolders.length > 0) ? '<br><span style="font-size:0.85rem;color:var(--text2)">' + childNote + '메모 ' + folderMemos.length + '개도 휴지통으로 이동합니다.</span>' : '';
+  confirmDeleteFolders([id]);
+}
+
+// 여러 폴더를 한꺼번에 지운다(2번 확인). 부모와 하위를 같이 골랐으면 하위는 부모와 함께 지워지므로 따로 세지 않는다
+function confirmDeleteFolders(ids, onDone) {
+  const picked = ids.map((id) => folders.find((f) => f.id === id)).filter(Boolean);
+  const pickedIds = new Set(picked.map((f) => f.id));
+  const roots = picked.filter((f) => !(f.parentId && pickedIds.has(f.parentId)));
+  if (!roots.length) return;
+  const allIds = new Set();
+  roots.forEach((f) => { allIds.add(f.id); getChildFolders(f.id).forEach((c) => allIds.add(c.id)); });
+  const childCount = allIds.size - roots.length;
+  const memoCount = memos.filter((m) => allIds.has(m.folder)).length;
+  const label = roots.length === 1 ? `"${escapeHtml(roots[0].name)}" 폴더` : `${roots.length}개 폴더`;
+  const childNote = childCount > 0 ? '하위 폴더 ' + childCount + '개, ' : '';
+  const detailNote = (memoCount > 0 || childCount > 0) ? '<br><span style="font-size:0.85rem;color:var(--text2)">' + childNote + '메모 ' + memoCount + '개도 휴지통으로 이동합니다.</span>' : '';
 
   // 1차 확인
   const o1 = document.createElement('div');
   o1.className = 'modal-overlay';
-  o1.innerHTML = `<div class="modal-box"><p>"${name}" 폴더를 삭제할까요?${detailNote}</p><button class="btn btn-secondary" id="fdel-cancel">취소</button> <button class="btn btn-primary" id="fdel-ok">삭제</button></div>`;
+  o1.innerHTML = `<div class="modal-box"><p>${label}를 삭제할까요?${detailNote}</p><button class="btn btn-secondary" id="fdel-cancel">취소</button> <button class="btn btn-primary" id="fdel-ok">삭제</button></div>`;
   document.body.appendChild(o1);
   o1.querySelector('#fdel-cancel').onclick = () => o1.remove();
   o1.addEventListener('click', (e) => { if (e.target === o1) o1.remove(); });
@@ -1561,15 +1569,35 @@ function confirmDeleteFolder(id) {
     // 2차 확인
     const o2 = document.createElement('div');
     o2.className = 'modal-overlay';
-    o2.innerHTML = `<div class="modal-box"><p>"${name}" 폴더를 정말 삭제할까요?</p><button class="btn btn-secondary" id="fdel-cancel2">취소</button> <button class="btn btn-primary" id="fdel-ok2">삭제</button></div>`;
+    o2.innerHTML = `<div class="modal-box"><p>${label}를 정말 삭제할까요?</p><button class="btn btn-secondary" id="fdel-cancel2">취소</button> <button class="btn btn-primary" id="fdel-ok2">삭제</button></div>`;
     document.body.appendChild(o2);
     o2.querySelector('#fdel-cancel2').onclick = () => o2.remove();
     o2.addEventListener('click', (e) => { if (e.target === o2) o2.remove(); });
     o2.querySelector('#fdel-ok2').onclick = () => {
       o2.remove();
-      deleteFolder(id);
+      roots.forEach((f) => deleteFolder(f.id));
+      if (roots.length > 1) showToast(roots.length + '개 폴더가 휴지통으로 이동되었습니다');
+      if (onDone) onDone();
     };
   };
+}
+
+// 여러 최상위 폴더를 한꺼번에 휴면 처리/해제 (하위 폴더는 부모를 따르므로 건너뛴다)
+function setFoldersDormant(ids, on) {
+  const now = Date.now();
+  let n = 0;
+  for (const id of ids) {
+    const f = folders.find((x) => x.id === id);
+    if (!f || f.parentId || !!f.dormant === on) continue;
+    f.dormant = on;
+    f.updatedAt = now;
+    n++;
+  }
+  if (!n) return;
+  saveLocalData();
+  renderAll();
+  scheduleSyncToDropbox();
+  showToast(n + '개 폴더' + (on ? '가 휴면 처리되었습니다' : '의 휴면이 해제되었습니다'));
 }
 
 function deleteFolder(id) {
@@ -1646,7 +1674,7 @@ function applyFolderMove(plan) {
 // 사이드바 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'로 연다.
 // 줄 끝 ⋮ 하나에 모든 기능: 열기·이름 바꾸기·하위 폴더·옮기기·비밀번호·휴면(최상위만)·삭제.
 // 왼쪽 손잡이를 끌어 순서를 바꾸고, 다른 폴더 위에 놓으면 그 하위로, 휴면 칸에 놓으면 휴면이 된다.
-let fm = null;   // 열려 있을 때 { el, body, editing, creating, menu, drag, openedAt }
+let fm = null;   // 열려 있을 때 { el, body, editing, creating, menu, drag, openedAt, selected(체크한 id), lastCheck }
 
 function openFolderManager(focusId) {
   if (fm) { renderFolderManager(true); flashFolderRow(focusId); return; }
@@ -1660,18 +1688,21 @@ function openFolderManager(focusId) {
         <button class="fm-info" id="fm-info" type="button" title="사용법">ⓘ</button>
         <button class="btn btn-primary" id="fm-add">+ 새 폴더</button>
       </div>
+      <div class="fm-selbar" id="fm-selbar" hidden></div>
       <div class="fm-tip" id="fm-tip" hidden>
         왼쪽 손잡이(${ico('grip')})를 끌어 순서 바꾸기 · 다른 폴더 위에 놓으면 그 하위로 · 휴면 칸에 놓으면 휴면<br>
+        체크박스로 여러 폴더를 골라 한꺼번에 휴면·삭제 · PC는 Shift+클릭으로 범위 선택<br>
         이름은 두 번 클릭해 바로 고칠 수 있어요 · 휴면 폴더의 글은 '전체'에서 숨겨집니다
       </div>
       <div class="fm-body" id="fm-body"></div>
     </div>`;
   document.body.appendChild(el);
-  fm = { el, body: el.querySelector('#fm-body'), editing: null, creating: null, menu: null, drag: null, openedAt: Date.now() };
+  fm = { el, body: el.querySelector('#fm-body'), editing: null, creating: null, menu: null, drag: null, openedAt: Date.now(), selected: new Set(), lastCheck: null };
 
   el.querySelector('#fm-close').onclick = () => closeFolderManager();
   el.querySelector('#fm-info').onclick = () => { const t = el.querySelector('#fm-tip'); t.hidden = !t.hidden; };
   el.querySelector('#fm-add').onclick = () => startFmCreate(null);
+  el.querySelector('#fm-selbar').addEventListener('click', onFmSelbarClick);
   // 바깥(어두운 부분) 누르면 닫기 — PC 에서만 보인다
   el.addEventListener('click', (e) => {
     if (fm && fm.menu && !e.target.closest('.fm-menu') && !e.target.closest('[data-act="menu"]')) closeFmMenu();
@@ -1712,6 +1743,7 @@ function onFmKeydown(e) {
   e.preventDefault();
   if (fm.drag) { endFmDrag(false); return; }
   if (fm.menu) { closeFmMenu(); return; }
+  if (fm.selected.size) { fm.selected.clear(); updateFmSelection(); return; }
   closeFolderManager();
 }
 
@@ -1737,7 +1769,9 @@ function fmRowHtml(f, kind) {
   const name = fm.editing === f.id
     ? `<input class="fm-input" value="${escapeHtml(f.name)}" maxlength="60" aria-label="폴더 이름">`
     : `<span class="fm-name-text">${escapeHtml(f.name)}</span>${f.password ? `<span class="fm-lock" title="비밀번호 걸림">${ico('lock')}</span>` : ''}`;
-  return `<div class="fm-row${kind === 'child' ? ' fm-child' : ''}" data-id="${f.id}" data-parent="${kind === 'child' ? f.parentId : ''}"${kind === 'stray' ? ' data-stray="1"' : ''}>
+  const sel = fm.selected.has(f.id);
+  return `<div class="fm-row${kind === 'child' ? ' fm-child' : ''}${sel ? ' selected' : ''}" data-id="${f.id}" data-parent="${kind === 'child' ? f.parentId : ''}"${kind === 'stray' ? ' data-stray="1"' : ''}>
+    <label class="fm-check" title="선택"><input type="checkbox" data-check="${f.id}"${sel ? ' checked' : ''}></label>
     <span class="fm-grip" title="끌어서 옮기기">${ico('grip')}</span>
     <span class="fm-name">${ico('folder')}${name}</span>
     <span class="fm-count">${count}</span>
@@ -1747,6 +1781,7 @@ function fmRowHtml(f, kind) {
 
 function fmNewRowHtml(isChild) {
   return `<div class="fm-row fm-new${isChild ? ' fm-child' : ''}">
+    <span class="fm-check"></span>
     <span class="fm-grip"></span>
     <span class="fm-name">${ico('folder')}<input class="fm-input" placeholder="새 폴더 이름" maxlength="60" aria-label="새 폴더 이름"></span>
   </div>`;
@@ -1786,6 +1821,7 @@ function renderFolderManager(force) {
       ${dormantHtml || '<div class="fm-empty">비어 있음</div>'}
     </div>`;
   fm.body.scrollTop = scroll;
+  updateFmSelection();
 
   const input = fm.body.querySelector('.fm-input');
   if (input) {
@@ -1812,14 +1848,67 @@ function flashFolderRow(id) {
 }
 
 function onFmBodyClick(e) {
+  const cb = e.target.closest('input[data-check]');
   // 길게 눌러 연 직후 손을 뗄 때 생기는 클릭이 그 자리 버튼을 누르지 않게
-  if (Date.now() - fm.openedAt < 400) return;
+  if (Date.now() - fm.openedAt < 400) { if (cb) e.preventDefault(); return; }
+  if (cb) { toggleFmSelect(cb.dataset.check, cb.checked, e.shiftKey); return; }
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   const id = btn.closest('.fm-row').dataset.id;
   if (btn.dataset.act === 'menu') {
     if (fm.menu && fm.menu.id === id) closeFmMenu(); else openFmMenu(id, btn);
   }
+}
+
+// 체크 켜기/끄기. Shift 를 누르고 고르면 지난번 고른 줄부터 여기까지(화면 순서) 같은 상태로
+function toggleFmSelect(id, on, shift) {
+  const ids = [...fm.body.querySelectorAll('.fm-row[data-id]')].map((r) => r.dataset.id);
+  let range = [id];
+  if (shift && fm.lastCheck && ids.includes(fm.lastCheck)) {
+    const a = ids.indexOf(fm.lastCheck), b = ids.indexOf(id);
+    range = ids.slice(Math.min(a, b), Math.max(a, b) + 1);
+  }
+  range.forEach((x) => { if (on) fm.selected.add(x); else fm.selected.delete(x); });
+  fm.lastCheck = id;
+  updateFmSelection();
+}
+
+// 줄 표시·체크 상태와 위쪽 선택 막대(N개 선택 · 휴면 처리 · 휴면 해제 · 삭제)를 맞춘다
+function updateFmSelection() {
+  if (!fm) return;
+  for (const id of fm.selected) if (!folders.some((f) => f.id === id)) fm.selected.delete(id);
+  fm.body.querySelectorAll('.fm-row[data-id]').forEach((r) => {
+    const on = fm.selected.has(r.dataset.id);
+    r.classList.toggle('selected', on);
+    const cb = r.querySelector('input[data-check]');
+    if (cb) cb.checked = on;
+  });
+  const bar = fm.el.querySelector('#fm-selbar');
+  const header = fm.el.querySelector('.fm-header');
+  const n = fm.selected.size;
+  header.hidden = n > 0;
+  bar.hidden = n === 0;
+  if (!n) return;
+  const picked = folders.filter((f) => fm.selected.has(f.id));
+  const canSleep = picked.some((f) => !f.parentId && !f.dormant);
+  const canWake = picked.some((f) => !f.parentId && f.dormant);
+  bar.innerHTML = `
+    <button class="fm-icon-btn" data-sel="clear" type="button" title="선택 해제">${ico('close')}</button>
+    <span class="fm-sel-n">${n}개 선택</span>
+    ${canSleep ? `<button class="fm-sel-btn" data-sel="sleep" type="button">${ico('moon')}<span>휴면 처리</span></button>` : ''}
+    ${canWake ? `<button class="fm-sel-btn" data-sel="wake" type="button">${ico('sun')}<span>휴면 해제</span></button>` : ''}
+    <button class="fm-sel-btn danger" data-sel="delete" type="button">${ico('trash')}<span>삭제</span></button>`;
+}
+
+function onFmSelbarClick(e) {
+  const b = e.target.closest('[data-sel]');
+  if (!b || !fm) return;
+  const ids = [...fm.selected];
+  const done = () => { if (fm) { fm.selected.clear(); updateFmSelection(); } };
+  if (b.dataset.sel === 'clear') done();
+  else if (b.dataset.sel === 'sleep') { setFoldersDormant(ids, true); done(); }
+  else if (b.dataset.sel === 'wake') { setFoldersDormant(ids, false); done(); }
+  else if (b.dataset.sel === 'delete') confirmDeleteFolders(ids, done);
 }
 
 function openFmMenu(id, anchor) {
@@ -2055,7 +2144,8 @@ function updateFmDrag() {
     top = last.offsetTop + last.offsetHeight;
   }
   d.line.style.top = (top - 1) + 'px';
-  d.line.style.left = (t.parentId ? 66 : 10) + 'px';   // 하위로 들어가는 자리는 들여 긋는다
+  // 하위로 들어가는 자리는 하위 줄 손잡이 위치부터 들여 긋는다
+  d.line.style.left = (t.parentId && t.lineEl ? t.lineEl.querySelector('.fm-grip').offsetLeft : 10) + 'px';
   d.line.style.display = 'block';
 }
 
