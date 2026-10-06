@@ -1,14 +1,14 @@
-const CACHE_NAME = 'memo-v155';
+const CACHE_NAME = 'memo-v156';
 const ASSETS = [
-  '/project-papers/',
-  '/project-papers/index.html',
-  '/project-papers/style.css',
-  '/project-papers/app.js',
-  '/project-papers/sync-split.js',
-  '/project-papers/manifest.json',
-  '/project-papers/favicon.svg',
-  '/project-papers/icon-192.png',
-  '/project-papers/icon-512.png',
+  '/projectpapers/',
+  '/projectpapers/index.html',
+  '/projectpapers/style.css',
+  '/projectpapers/app.js',
+  '/projectpapers/sync-split.js',
+  '/projectpapers/manifest.json',
+  '/projectpapers/favicon.svg',
+  '/projectpapers/icon-192.png',
+  '/projectpapers/icon-512.png',
 ];
 
 // 설치할 때는 서버에서 새로 받는다 — 브라우저 HTTP 캐시(GitHub Pages 10분)에 남은 옛 파일이 구워지지 않게.
@@ -60,7 +60,7 @@ self.addEventListener('fetch', (e) => {
     const hit = await caches.match(e.request, { ignoreSearch: isPage });
     if (hit) return hit;
     // 새 창(?memo=…)처럼 주소 뒤가 달라도 앱 화면을 띄운다
-    if (isPage) return (await caches.match('/project-papers/')) || (await caches.match('/project-papers/index.html'));
+    if (isPage) return (await caches.match('/projectpapers/')) || (await caches.match('/projectpapers/index.html'));
     return null;
   };
   e.respondWith((async () => {

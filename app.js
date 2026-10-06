@@ -1,31 +1,44 @@
 // ── 저장 칸·Dropbox 위치·동기화 방식 ──
 // ?pilot        시범 운전 칸: 진짜 메모와 따로 돌린다
-//               (기기 저장은 'pilot:' 칸, Dropbox 는 /project-papers-pilot. 로그인만 함께 쓴다)
+//               (기기 저장은 'pilot:' 칸, Dropbox 는 /projectpapers-pilot. 로그인만 함께 쓴다)
 // ?ns=이름&split=1  시험용 — 이 컴퓨터(localhost)에서만. 한 브라우저 안에서 여러 기기를 흉내 낸다(split 없으면 옛 한 파일 방식)
 const PAGE_PARAMS = new URLSearchParams(location.search);
 const IS_LOCAL_TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const PILOT = PAGE_PARAMS.has('pilot');
 const TEST_NS = IS_LOCAL_TEST ? PAGE_PARAMS.get('ns') : null;
 const STORE_NS = PILOT ? 'pilot:' : TEST_NS ? TEST_NS + ':' : '';
+// Dropbox 안 데이터 위치. 2026-10-06 주소를 /projectpapers/ 로 바꾸며 폴더 이름도 바꿨다.
+// 옛 폴더(OLD_DBX_ROOT)는 새 앱이 처음 동기화할 때 서버 안에서 복사해 오고 '옮겨 감' 표시를 단다(sync-split.js adoptOldRoot)
+const DBX_ROOT = PILOT ? '/projectpapers-pilot' : '/projectpapers';
+const OLD_DBX_ROOT = PILOT ? '/project-papers-pilot' : '/project-papers';
 // 글 단위 동기화(sync-split.js) — 2026-10-04 전환. 옛 한 파일 방식은 옮겨 올 때와 시험에서만 쓴다
 const SPLIT_SYNC = TEST_NS != null ? PAGE_PARAMS.get('split') === '1' : true;
 const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh']);   // 로그인은 칸과 상관없이 하나
+// Dropbox 위치에 딸린 동기화 기록(받은 커서·파일 버전·기준점·못 보낸 변경)은 위치 이름을 붙여 따로 둔다.
+// 옛 주소의 앱도 같은 기기 저장소(door9.github.io)를 쓰므로, 옛 앱이 옛 폴더 기록을 써도 섞이지 않게.
+// 새 위치에서는 기록이 비어 있어 처음 맞추기(받아서 합치고 다른 것만 올리기)부터 한다. 글·폴더 자체는 함께 쓴다
+const ROOT_KEYS = new Set(['split_revs', 'split_base', 'split_cursor', 'split_ready', 'split_frozen', 'split_frozen_at',
+  'root_adopted', 'dbx_rev', 'sync_base', 'last_synced_at', 'pending_sync']);
+const ROOT_TAG = DBX_ROOT.slice(1) + '/';
 const store = {
-  key: (k) => (SHARED_KEYS.has(k) ? k : STORE_NS + k),
+  key: (k) => (SHARED_KEYS.has(k) ? k : STORE_NS + (ROOT_KEYS.has(k) ? ROOT_TAG : '') + k),
   getItem: (k) => window.localStorage.getItem(store.key(k)),
   setItem: (k, v) => window.localStorage.setItem(store.key(k), v),
   removeItem: (k) => window.localStorage.removeItem(store.key(k)),
-  // 다른 창의 저장 신호(storage 이벤트)의 키 → 이 칸에서의 이름. 다른 칸 것이면 null
+  // 다른 창의 저장 신호(storage 이벤트)의 키 → 이 칸에서의 이름. 다른 칸·다른 위치 것이면 null
   nameOf: (raw) => {
     if (raw == null) return null;
     if (SHARED_KEYS.has(raw)) return raw;
-    if (!STORE_NS) return raw.includes(':') ? null : raw;
-    return raw.startsWith(STORE_NS) ? raw.slice(STORE_NS.length) : null;
+    let k = raw;
+    if (!STORE_NS) { if (raw.includes(':')) return null; }
+    else if (raw.startsWith(STORE_NS)) k = raw.slice(STORE_NS.length);
+    else return null;
+    if (k.startsWith(ROOT_TAG)) return k.slice(ROOT_TAG.length);
+    return ROOT_KEYS.has(k) || k.includes('/') ? null : k;
   },
 };
 // 시범·시험 창에서 새 창을 열 때도 같은 칸을 쓰게 주소 꼬리를 이어 붙인다
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
-const DBX_ROOT = PILOT ? '/project-papers-pilot' : '/project-papers';
 
 // ── Config ──
 const DROPBOX_CLIENT_ID = '0kfnwj8hluxzpun';
@@ -141,6 +154,14 @@ async function init() {
   await handleOAuthCallback();
   loadLocalData();
   cleanupEmptyMemo();
+
+  // 옛 주소(/project-papers/)의 안내 페이지에서 넘어왔다 = 설치해 둔 앱이 아직 옛 주소를 가리킨다
+  if (PAGE_PARAMS.get('moved') === '1') {
+    const p = new URLSearchParams(location.search);
+    p.delete('moved');
+    history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p : '') + location.hash);
+    setTimeout(() => showToast('주소가 바뀌었습니다. 설치한 앱은 지우고 이 주소에서 다시 설치해 주세요'), 1000);
+  }
 
   // URL 파라미터로 특정 메모 열기 (새 창)
   const urlParams = new URLSearchParams(location.search);

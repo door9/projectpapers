@@ -416,6 +416,7 @@ async function splitPush(force, retried) {
 // 이미 옮겨져 있으면 전체를 받아(압축 파일 하나) 이 기기 내용과 합치고, 다른 것만 올린다.
 async function splitFirstSync() {
   setSyncStatus('syncing', '새 동기화 방식으로 맞추는 중...');
+  await adoptOldRoot();
   store.removeItem('split_cursor');
   saveSplitState({ revs: {}, base: {} });
   let L = await splitList();
@@ -423,7 +424,7 @@ async function splitFirstSync() {
   if (!hasMeta) {
     // 시범 운전 첫 실행: 진짜 파일을 시범 폴더로 복사해 온다(서버 안 복사, 진짜 파일은 그대로)
     if (PILOT && !(await dbxGetMetadata())) {
-      const c = await dbxRpc('files/copy_v2', { from_path: '/project-papers/memos.json', to_path: DROPBOX_FILE, autorename: false });
+      const c = await dbxRpc('files/copy_v2', { from_path: '/projectpapers/memos.json', to_path: DROPBOX_FILE, autorename: false });
       if (!c.ok && c.status !== 409) throw new Error('pilot copy failed: ' + c.status);
     }
     // 아직 아무도 안 옮겼다 → 옛 한 파일을 받아 이 기기 내용과 합친다(옛 규칙 그대로)
@@ -446,6 +447,54 @@ async function splitFirstSync() {
   if (store.getItem('split_frozen') !== '1') await freezeLegacy();
   await splitPush(false, true);   // 얼렸다는 표시를 meta 에 올린다
   return false;
+}
+
+// ── 옛 폴더에서 옮겨 오기 (2026-10-06 /project-papers → /projectpapers) ──
+// 옮기기(move)가 아니라 서버 안 복사 + 옛 폴더에 '옮겨 감' 표시. 아직 옛 주소로 떠 있는 앱이
+// 옛 폴더가 통째로 사라진 것을 보면 글이 모두 지워졌다고 여기거나 옛 폴더를 다시 만들 수 있어서다.
+// 표시(meta dataVersion 5)를 본 옛 앱은 올리기를 멈추고 새로고침해 → 옛 주소의 안내 페이지 → 새 주소로 온다.
+// 복사와 표시 사이에 옛 앱이 옛 폴더에 올린 것은 그 기기 저장에 남아 있다가, 그 기기가 새 앱으로 오면 처음 맞추기에서 올라간다.
+async function adoptOldRoot() {
+  if (store.getItem('root_adopted') === '1' || OLD_DBX_ROOT === DBX_ROOT) return;
+  const here = await dbxRpc('files/get_metadata', { path: SPLIT_DIR + '/meta.json' });
+  if (!here.ok) {
+    if (here.status !== 409) throw new Error('lookup failed: ' + here.status);
+    // 새 폴더가 아직 없다 → 내가 옮긴다. 글 폴더(sync)를 먼저 복사하고 바로 옛 쪽에 표시를 단 뒤, 백업·옛 한 파일을 복사
+    await copyFromOldRoot('sync');
+    await markOldRootMoved();
+    await copyFromOldRoot('backups');
+    await copyFromOldRoot('memos.json');
+  } else {
+    await markOldRootMoved();   // 다른 기기가 옮겼다. 표시를 못 달고 끊겼을 수 있으니 확인만
+  }
+  store.setItem('root_adopted', '1');
+}
+
+// 옛 폴더에 없거나(처음부터 새 위치) 새 쪽에 이미 있으면(다른 기기가 동시에 옮김) 그냥 지나간다
+async function copyFromOldRoot(name) {
+  const r = await dbxRpc('files/copy_v2', { from_path: OLD_DBX_ROOT + '/' + name, to_path: DBX_ROOT + '/' + name, autorename: false });
+  if (r.ok) return;
+  const why = (r.data && r.data.error_summary) || '';
+  if (r.status === 409 && /^(from_lookup\/not_found|to\/conflict)/.test(why)) return;
+  throw new Error('copy failed: ' + r.status + ' ' + why.slice(0, 80));
+}
+
+// 옛 폴더 meta 에 '옮겨 감' 표시 — 내용은 그대로 두고 dataVersion 만 올린다(옛 앱의 markOutdated 가 이것을 본다)
+async function markOldRootMoved() {
+  const path = OLD_DBX_ROOT + '/sync/meta.json';
+  for (let i = 0; i < 3; i++) {
+    const cur = await dbxGet(path);
+    if (!cur) return;   // 옛 폴더가 없다
+    let meta;
+    try { meta = JSON.parse(cur.text); } catch { return; }
+    if (meta.movedTo) return;   // 이미 달았다
+    meta.dataVersion = SPLIT_DATA_VERSION + 1;
+    meta.movedTo = DBX_ROOT;
+    meta.movedAt = Date.now();
+    const r = await dbxPut(path, canon(meta), { '.tag': 'update', update: cur.rev });
+    if (!r.conflict) return;
+  }
+  throw new Error('old meta busy');
 }
 
 // 옛 한 파일에 '옮겨 감(dataVersion 4)' 표시를 단다. 내용은 지금 이 기기의 전체(비상용 사본)로 둔다.
