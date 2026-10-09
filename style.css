@@ -315,7 +315,7 @@ html, body {
 }
 .btn-sm:hover { background: var(--bg2); }
 
-/* Char count */
+/* Char count — 왼쪽은 동기화 표시, 오른쪽은 글자 수 */
 #char-count {
   padding: 4px 20px;
   font-size: 0.7rem;
@@ -325,6 +325,51 @@ html, body {
   background: var(--card);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
+#char-count { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#sync-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text2);
+  font: inherit;
+  cursor: default;
+  white-space: nowrap;
+}
+#sync-dot::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+#sync-dot.ok::before { background: var(--success); }
+#sync-dot.wait::before { background: #c9a227; }
+#sync-dot.busy::before { background: var(--text2); animation: sync-pulse 1s ease-in-out infinite; }
+#sync-dot.bad { color: var(--accent); cursor: pointer; }
+#sync-dot.bad::before { background: var(--accent); }
+@keyframes sync-pulse { 50% { opacity: 0.25; } }
+
+/* 충돌본을 열면 제목 아래에 — 원본과 비교 */
+#conflict-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: #f9e4ea;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+#conflict-bar span { font-weight: 600; }
+#btn-conflict-compare {
+  margin-left: auto;
+  padding: 3px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+#btn-conflict-compare:hover { background: var(--bg); }
 
 /* Folder dropdown */
 .folder-dropdown {
@@ -809,6 +854,32 @@ body.fm-drag-on, body.fm-drag-on * { cursor: grabbing !important; user-select: n
   margin-right: 2px;
 }
 
+/* 검색: 찾은 자리 한 줄 · 휴면 폴더에서 찾은 글 */
+.memo-item-snippet {
+  margin-top: 2px;
+  font-size: 0.72rem;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.memo-item-snippet b { color: var(--text); font-weight: 700; background: #f0f87a; }
+.memo-list-divider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 2px 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 0.72rem;
+  color: var(--text2);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.memo-list-divider .ico { width: 1.1em; height: 1.1em; }
+.memo-item.dormant-hit .memo-item-title { color: var(--text2); }
+.memo-list-empty { padding: 16px 10px; font-size: 0.8rem; color: var(--text2); text-align: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
 /* Folder select in editor toolbar */
 #memo-folder-select {
   padding: 6px 8px;
@@ -1136,9 +1207,54 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   color: var(--text2);
   font-size: 1.1rem;
   gap: 12px;
+  overflow-y: auto;
+}
+/* 이 부분을 누르면 새 글 */
+.empty-hero { display: flex; flex-direction: column; align-items: center; gap: 12px; cursor: pointer; }
+#empty-state .icon { font-size: 3rem; opacity: 0.3; }
+/* 빈 화면 아래 최근 글 — 휴대폰에서만(넓은 화면은 왼쪽 목록이 늘 보인다) */
+#recent-list { display: none; }
+@media (max-width: 768px) {
+  #empty-state:has(#recent-list:not(:empty)) { justify-content: flex-start; padding: 72px 16px 24px; }
+  #recent-list:not(:empty) {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 480px;
+    margin-top: 18px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+}
+.recent-head { padding: 10px 14px 6px; font-size: 0.75rem; font-weight: 600; color: var(--text2); }
+.recent-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--bg2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
-#empty-state .icon { font-size: 3rem; opacity: 0.3; }
+.recent-item:hover { background: var(--bg); }
+.recent-title { flex: 1; min-width: 0; font-size: 0.95rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-date { flex-shrink: 0; font-size: 0.75rem; color: var(--text2); }
+.recent-all {
+  padding: 11px 14px;
+  background: var(--bg);
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
 
 /* Login screen */
 #login-screen {
@@ -1212,6 +1328,102 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
 .modal-box input[type="password"]:focus { border-color: var(--accent); }
 .modal-box input.error { border-color: var(--accent); }
 .modal-box input.error::placeholder { color: var(--accent); }
+
+/* 확인 창의 덧말 · 도움말의 판 번호 · 로그인 화면의 까닭 */
+.ask-note { font-size: 0.8rem; color: var(--text2); }
+.help-ver { margin-top: 12px; font-size: 0.72rem; color: var(--text2); text-align: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+.login-reason { color: var(--accent) !important; font-size: 0.9rem; }
+
+/* 휴지통 */
+.modal-box.trash-box {
+  max-width: 520px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  padding: 14px 16px 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.trash-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.trash-head h3 { display: flex; align-items: center; gap: 6px; font-size: 1rem; font-family: 'Georgia', 'Times New Roman', serif; }
+.trash-head h3 .ico { width: 18px; height: 18px; color: var(--text2); }
+.trash-n { font-size: 0.8rem; font-weight: 400; color: var(--text2); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+.modal-box input.trash-filter {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 0.85rem;
+  outline: none;
+}
+.modal-box input.trash-filter:focus { border-color: var(--accent); }
+.modal-box input.trash-filter[hidden] { display: none; }
+.trash-list { overflow-y: auto; flex: 1; min-height: 0; border-top: 1px solid var(--border); }
+.trash-item { border-bottom: 1px solid var(--border); }
+.trash-row { display: flex; align-items: center; gap: 6px; padding: 8px 2px; }
+.trash-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.trash-main[data-tact] { cursor: pointer; }
+.trash-main > .ico { width: 18px; height: 18px; color: var(--text2); }
+.trash-text { min-width: 0; flex: 1; }
+.trash-name { font-size: 0.88rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trash-meta { margin-top: 1px; font-size: 0.7rem; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.modal-box .trash-btn { flex: 0 0 auto; margin: 0; padding: 4px 9px; font-size: 0.75rem; }
+.trash-del { background: none; border: 1px solid var(--border); border-radius: var(--radius); color: var(--accent); cursor: pointer; font-weight: 600; }
+.trash-del:hover { border-color: var(--accent); }
+.trash-preview {
+  margin: 0 2px 8px 28px;
+  padding: 6px 10px;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8rem;
+  color: var(--text2);
+  background: var(--bg);
+  border-radius: var(--radius);
+}
+.trash-preview[hidden] { display: none; }
+.trash-empty { padding: 18px 0; font-size: 0.88rem; color: var(--text2); text-align: center; }
+.trash-foot { display: flex; justify-content: space-between; padding-top: 10px; }
+.trash-foot[hidden] { display: none; }
+.trash-link { background: none; border: none; padding: 4px 2px; color: var(--text2); font: inherit; font-size: 0.8rem; cursor: pointer; text-decoration: underline; }
+.trash-link:hover { color: var(--text); }
+.trash-link.danger { color: var(--accent); }
+
+/* 충돌본 ↔ 원본 비교 */
+.modal-box.cmp-box {
+  max-width: 640px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  padding: 14px 16px 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.modal-box .cmp-legend { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 0.75rem; color: var(--text2); }
+.cmp-key { padding: 1px 8px; border-radius: 10px; }
+.modal-box .cmp-title { font-size: 0.78rem; color: var(--text2); margin-bottom: 8px; }
+.cmp-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: 'Gulim', '굴림', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.cmp-line { padding: 1px 10px; white-space: pre-wrap; word-break: break-word; }
+.cmp-del { background: #f9e4ea; }
+.cmp-line.cmp-del { box-shadow: inset 3px 0 0 var(--accent); }
+.cmp-add { background: #e2f1e6; }
+.cmp-line.cmp-add { box-shadow: inset 3px 0 0 var(--success); }
+.cmp-fold { padding: 2px 10px; font-size: 0.72rem; color: var(--text2); background: var(--bg); text-align: center; }
+.cmp-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 10px; }
+.modal-box .cmp-foot .btn { flex: 0 0 auto; margin: 0; }
 
 /* legacy compat */
 .delete-confirm { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }

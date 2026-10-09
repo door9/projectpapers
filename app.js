@@ -23,7 +23,10 @@ const ROOT_TAG = DBX_ROOT.slice(1) + '/';
 const store = {
   key: (k) => (SHARED_KEYS.has(k) ? k : STORE_NS + (ROOT_KEYS.has(k) ? ROOT_TAG : '') + k),
   getItem: (k) => window.localStorage.getItem(store.key(k)),
-  setItem: (k, v) => window.localStorage.setItem(store.key(k), v),
+  // 기기 저장 공간이 가득 차도 앱이 멈추지 않게 — 알리고, Dropbox 로는 계속 보낸다(글은 화면·메모리에 있다)
+  setItem: (k, v) => {
+    try { window.localStorage.setItem(store.key(k), v); } catch (e) { onStorageFull(e); }
+  },
   removeItem: (k) => window.localStorage.removeItem(store.key(k)),
   // 다른 창의 저장 신호(storage 이벤트)의 키 → 이 칸에서의 이름. 다른 칸·다른 위치 것이면 null
   nameOf: (raw) => {
@@ -39,6 +42,20 @@ const store = {
 };
 // 시범·시험 창에서 새 창을 열 때도 같은 칸을 쓰게 주소 꼬리를 이어 붙인다
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
+
+// 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
+const APP_VERSION = '158';
+
+let storageFullAt = 0;
+function onStorageFull(e) {
+  console.error('기기 저장 실패:', e);
+  if (Date.now() - storageFullAt < 60000) return;   // 알림은 1분에 한 번만
+  storageFullAt = Date.now();
+  setTimeout(() => showToast('기기 저장 공간이 가득 차 이 기기에 저장하지 못했습니다. Dropbox 로는 계속 보냅니다 — 휴지통을 비우면 공간이 생깁니다', { duration: 8000 }), 0);
+}
+
+// 줄바꿈 맞추기 — 입력칸은 \r\n 을 \n 으로 바꿔 돌려준다
+const lf = (s) => String(s || '').replace(/\r\n?/g, '\n');
 
 // ── Config ──
 const DROPBOX_CLIENT_ID = '0kfnwj8hluxzpun';
@@ -67,12 +84,11 @@ const REDIRECT_URI = location.origin + location.pathname;
 let memos = [];
 let folders = [];
 let trash = []; // 휴지통: { type: 'memo'|'folder', data: {...}, deletedAt: timestamp }
-let deletedIds = []; // 영구 삭제된 항목: { id, at } (동기화 시 복귀 차단, 30일 후 자동 정리)
+let deletedIds = []; // 영구 삭제된 항목: { id, at } (동기화 시 되살아나지 않게. 지우지 않고 계속 둔다)
 let currentId = null;
 let currentFolder = null; // null = all
 let accessToken = store.getItem('dbx_token') || null;
 let refreshToken = store.getItem('dbx_refresh') || null;
-let isOnline = !!accessToken;
 let viewerMode = false;
 let favFilterActive = false;
 let selectMode = false;
@@ -170,29 +186,43 @@ async function init() {
     setTimeout(() => showToast('주소가 바뀌었습니다. 설치한 앱은 지우고 이 주소에서 다시 설치해 주세요'), 1000);
   }
 
-  // URL 파라미터로 특정 메모 열기 (새 창)
+  // URL 파라미터로 특정 메모 열기 (새 창) / ?new=1 이면 새 창에서 새 글 쓰기(Ctrl+N)
   const urlParams = new URLSearchParams(location.search);
   const openMemoId = urlParams.get('memo');
+  const newNoteWindow = urlParams.get('new') === '1';
 
   // 새 창 모드는 URL 감지 즉시 적용 (햄버거 깜빡임·메모 미발견 시 노출 방지)
-  if (openMemoId) {
+  if (openMemoId || newNoteWindow) {
     document.body.classList.add('popup-mode');
   }
 
+  // 정렬·보던 폴더·즐겨찾기 필터는 다시 열어도 그대로
+  restoreUiPrefs();
+
   if (accessToken) {
     showApp();
-    syncFromDropbox().then(() => checkAutoBackup());
+    syncFromDropbox().then(() => { checkAutoBackup(); startWatch(); });
   } else {
     // 오프라인 모드: 백업 필요 플래그만 저장
     markAutoBackupPending();
+    // 로그인이 만료돼 로그아웃됐으면 로그인 화면에 까닭을 보여 준다
+    const why = sessionStorage.getItem('logout_reason');
+    if (why) {
+      sessionStorage.removeItem('logout_reason');
+      const p = document.createElement('p');
+      p.className = 'login-reason';
+      p.textContent = why;
+      loginScreen.insertBefore(p, $('#btn-login'));
+    }
   }
 
   // 네트워크 복구 시 자동 동기화 + 보류된 자동 백업 실행
   window.addEventListener('online', () => {
     if (accessToken) {
-      syncFromDropbox().then(() => checkAutoBackupPending());
+      syncFromDropbox().then(() => { checkAutoBackupPending(); startWatch(); });
     }
   });
+  window.addEventListener('offline', () => { if (accessToken) settleSyncStatus(); });
 
   // 앱을 닫거나(beforeunload/pagehide), 다른 앱·화면으로 가려질 때(visibilitychange) 즉시 저장 + 동기화
   // 특히 휴대폰에서 홈으로 나가거나 앱을 전환할 때 beforeunload는 잘 안 불리므로 visibilitychange가 핵심
@@ -200,15 +230,23 @@ async function init() {
   window.addEventListener('pagehide', flushSave);
   // PC: 창을 떠나면(다른 창을 누르거나 휴대폰으로 옮겨 가기 전) 모아 둔 변경을 바로 올린다
   window.addEventListener('blur', () => {
-    if (accessToken && isDirty() && !reloadingForUpdate) syncToDropboxIfDirty().catch(() => {});
+    if (accessToken && isDirty() && !reloadingForUpdate) syncToDropboxIfDirty().catch(onSyncError);
+  });
+  // PC: 창으로 돌아오면(다른 창을 눌렀다 다시 누름) 그사이 다른 기기에서 고친 것을 받는다
+  window.addEventListener('focus', () => {
+    if (!accessToken || document.visibilityState !== 'visible') return;
+    if (Date.now() - lastPullAt > 30000) syncFromDropbox();
+    startWatch();
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') { flushSave(); return; }
+    if (document.visibilityState === 'hidden') { flushSave(); stopWatch(); return; }
     // 돌아왔을 때: 새 버전이 나왔는지 보고(나왔으면 새 코드로 다시 연다),
-    // 못 보낸 변경을 올리고 다른 기기에서 고친 것을 받아 온다
-    // (매번 받지는 않는다 — 파일이 커서 탭을 오갈 때마다 받으면 느리다)
+    // 못 보낸 변경을 올리고 다른 기기에서 고친 것을 받아 온다(30초 안에 받았으면 생략)
     checkForUpdate();
-    if (accessToken && (isDirty() || Date.now() - lastPullAt > 30000)) syncFromDropbox();
+    if (!accessToken) return;
+    if (isDirty() || Date.now() - lastPullAt > 30000) syncFromDropbox();
+    startWatch();
+    checkAutoBackup();   // 며칠 켜 둔 기기도 날이 바뀌면 그날 백업을 한다(오늘 했으면 바로 끝남)
   });
 
   // 같은 기기의 다른 창에서 저장하면(localStorage 변경) 이 창에 즉시 반영
@@ -227,7 +265,6 @@ async function init() {
   $('#btn-login').addEventListener('click', loginDropbox);
   $('#btn-offline').addEventListener('click', (e) => {
     e.preventDefault();
-    isOnline = false;
     showApp();
   });
   $('#toolbar-reveal').addEventListener('click', () => {
@@ -251,6 +288,11 @@ async function init() {
   $('#btn-fav').addEventListener('click', toggleFavorite);
   $('#btn-undo').addEventListener('click', performUndo);
   $('#btn-redo').addEventListener('click', performRedo);
+  // 형광펜 단추 — 누를 때 본문의 선택(블록)이 풀리지 않게 포커스를 뺏지 않는다(휴대폰엔 Alt+H 가 없다)
+  $('#btn-highlight').addEventListener('pointerdown', (e) => e.preventDefault());
+  $('#btn-highlight').addEventListener('click', () => toggleHighlight(true));
+  $('#sync-dot').addEventListener('click', () => { if (accessToken && (syncProblem || isDirty())) syncFromDropbox(); });
+  $('#btn-conflict-compare').addEventListener('click', () => showConflictCompare(currentId));
   $('#btn-toolbar-more').addEventListener('click', toggleToolbarMore);
   $('#btn-template').addEventListener('click', toggleTemplateDropdown);
   $('#btn-template-save').addEventListener('click', saveAsTemplate);
@@ -260,12 +302,13 @@ async function init() {
   $('#btn-viewer').addEventListener('click', toggleViewer);
   $('#btn-help').addEventListener('click', showHelpDialog);
   $('#btn-delete').addEventListener('click', confirmDelete);
-  $('#memo-sort').addEventListener('change', (e) => { memoSortKey = e.target.value; renderMemoList(); });
+  $('#memo-sort').addEventListener('change', (e) => { memoSortKey = e.target.value; saveUiPrefs(); renderMemoList(); });
   $('#btn-select-mode').addEventListener('click', toggleSelectMode);
   $('#btn-bulk-delete').addEventListener('click', bulkDelete);
   $('#btn-bulk-move').addEventListener('click', bulkMoveUnified);
   $('#btn-bulk-cancel').addEventListener('click', () => toggleSelectMode());
-  $('#find-input').addEventListener('input', findCountOnly);
+  // 찾을 말을 고치면 '모두' 상태를 푼다 — 안 그러면 새 낱말로 '바꾸기'가 전부 바꿨다
+  $('#find-input').addEventListener('input', () => { findAllMode = false; updateReplaceLabel(); findCountOnly(); });
   $('#find-btn').addEventListener('click', findAndGo);
   $('#find-all-btn').addEventListener('click', findAllAndGo);
   $('#find-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); findAndGo(); } });
@@ -295,7 +338,8 @@ async function init() {
       return;
     }
     if (!(e.ctrlKey || e.metaKey)) return;
-    const k = e.key.toLowerCase();
+    // 한글 자판 상태에선 글자가 'ㄴ'처럼 올 수 있어, 그럴 땐 누른 자리(KeyS 등)로 본다
+    const k = keyLetter(e);
     // Ctrl+↓ → 다음 문단(엔터로 구분된 줄) 맨 앞으로 커서 이동 (기본 동작이 애매해서 직접 처리)
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'ArrowDown' && document.activeElement === editor) {
       e.preventDefault();
@@ -322,29 +366,50 @@ async function init() {
       performRedo();
       return;
     }
-    // Ctrl+F → 앱 찾기/바꾸기
+    // Ctrl+F → 앱 찾기/바꾸기 (이미 열려 있으면 닫지 않고 찾기 칸으로)
     if (k === 'f') {
       if (!currentId) return;
       e.preventDefault();
-      toggleFindReplace();
+      if ($('#find-replace-bar').style.display === 'none') toggleFindReplace();
+      else { const fi = $('#find-input'); fi.focus(); fi.select(); }
     }
     // Ctrl+S → 저장 및 동기화
     if (k === 's') {
       e.preventDefault();
       saveLocalData();
       if (accessToken) {
-        syncToDropbox().then(() => showToast('저장 및 동기화 완료')).catch(() => showToast('동기화 실패'));
+        const notSent = '기기에 저장했습니다 — Dropbox 로는 아직 못 보냈습니다(잠시 뒤 다시 보냅니다)';
+        syncToDropbox().then(() => showToast(syncProblem ? notSent : '저장 및 동기화 완료')).catch(() => showToast(notSent));
       } else {
         showToast('로컬에 저장됨');
       }
     }
   });
 
+  // Esc → 맨 위에 뜬 것부터 닫는다: 대화상자 → 펼친 목록(폴더·템플릿) → 찾기 창. 폴더 관리 화면은 제 손으로 닫는다
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || e.isComposing) return;
+    const overlays = document.querySelectorAll('.modal-overlay, .delete-confirm');
+    if (overlays.length) {
+      const top = overlays[overlays.length - 1];
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (top._close) top._close(); else top.remove();
+      return;
+    }
+    if (fm) return;
+    const dds = [$('#template-dropdown'), $('#folder-select-dropdown')].filter((d) => d.style.display !== 'none');
+    if (dds.length) { e.preventDefault(); dds.forEach((d) => { d.style.display = 'none'; }); return; }
+    if ($('#find-replace-bar').style.display !== 'none') { e.preventDefault(); toggleFindReplace(); editor.focus(); }
+  });
+
   $('#menu-toggle').addEventListener('click', () => {
     $('#sidebar').classList.toggle('open');
   });
+  // 휴대폰 뒤로가기가 목록(사이드바)도 한 겹으로 닫게 — 목록이 열리고 닫힐 때마다 기록 칸을 맞춘다
+  new MutationObserver(() => layersChanged()).observe($('#sidebar'), { attributes: true, attributeFilter: ['class'] });
 
-  // 에디터 영역 클릭: 사이드바 열려있으면 닫기만, 아니면 빈 화면에서 새 글
+  // 에디터 영역 클릭: 사이드바 열려있으면 닫기만, 아니면 빈 화면(There you are)을 누르면 새 글
   $('#editor-area').addEventListener('click', (e) => {
     const sidebar = $('#sidebar');
     if (sidebar.classList.contains('open')) {
@@ -352,9 +417,19 @@ async function init() {
       e.stopPropagation();
       return;
     }
-    if (emptyState.style.display !== 'none' && emptyState.contains(e.target)) {
+    if (emptyState.style.display !== 'none' && e.target.closest('.empty-hero')) {
       createMemo();
     }
+  });
+  // 빈 화면의 최근 글: 누르면 바로 그 글, '모든 글 보기'는 목록(사이드바)
+  $('#recent-list').addEventListener('click', (e) => {
+    const item = e.target.closest('.recent-item');
+    if (item) {
+      const memo = memos.find((m) => m.id === item.dataset.id);
+      if (memo) loadMemoInEditor(memo);
+      return;
+    }
+    if (e.target.closest('.recent-all')) { e.stopPropagation(); $('#sidebar').classList.add('open'); }
   });
 
   editor.addEventListener('input', onEditorInput);
@@ -373,27 +448,80 @@ async function init() {
 
   document.addEventListener('keydown', (e) => {
     // (Ctrl+S는 위 단축키 처리에서 저장·동기화까지 한다 — 여기서 또 처리하지 않는다)
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
+    // Ctrl+N → 새 창(글 목록 없이 글 쓰기만 하는 창, 목록 더블클릭 때와 같은 창)을 열고 거기서 새 글
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && keyLetter(e) === 'n') {
       e.preventDefault();
-      createMemo();
+      openNewNoteWindow();
     }
   });
 
   // 새 창으로 열린 경우 해당 메모 바로 표시 (popup-mode 클래스는 init 초반에 이미 적용됨)
-  if (openMemoId) {
+  if (newNoteWindow) {
+    // Ctrl+N 으로 열린 새 창: 새 글을 만들어 바로 쓰게 한다. 주소는 그 글 주소로 바꿔 둔다(새로고침해도 같은 글)
+    if (!accessToken) showApp();
+    const folderId = urlParams.get('folder');
+    const id = crypto.randomUUID();
+    history.replaceState(null, '', location.pathname + '?memo=' + id + MODE_QUERY);
+    createMemo({ id, folder: folderId && folders.some((f) => f.id === folderId) ? folderId : null });
+  } else if (openMemoId) {
     const memo = memos.find((m) => m.id === openMemoId);
     if (memo) {
-      if (!accessToken) { isOnline = false; showApp(); }
+      if (!accessToken) showApp();
       loadMemoInEditor(memo);
     }
   } else {
-    // 새 버전으로 다시 열린 경우 쓰던 글을 다시 연다
-    const reopenId = sessionStorage.getItem('reopen_memo');
+    // 다시 열면 쓰던 글을 쓰던 자리 그대로 연다 — 새 버전으로 다시 열렸을 때(reopen_memo)와,
+    // 휴대폰이 앱을 내렸다가 다시 열 때(open_memo: 글을 연 채 앱을 떠났으면 남아 있다). 잠긴 폴더 글은 열지 않는다
+    const reopenId = sessionStorage.getItem('reopen_memo') || store.getItem('open_memo');
     sessionStorage.removeItem('reopen_memo');
     const memo = reopenId && memos.find((m) => m.id === reopenId);
-    if (memo && accessToken) loadMemoInEditor(memo);
+    if (memo && accessToken && !isFolderLocked(memo.folder)) loadMemoInEditor(memo, { restorePos: true });
   }
 }
+
+// 단축키 글자 — 영문이면 그대로(소문자), 한글 자판 상태처럼 다른 글자가 오면 누른 자리(e.code 'KeyN' → 'n')로
+function keyLetter(e) {
+  const key = (e.key || '').toLowerCase();
+  if (/^[a-z]$/.test(key) || !/^Key[A-Z]$/.test(e.code || '')) return key;
+  return e.code.slice(3).toLowerCase();
+}
+
+// ── 화면 설정 기억 (정렬·보던 폴더·즐겨찾기 필터) ──
+function saveUiPrefs() {
+  if (document.body.classList.contains('popup-mode')) return;
+  store.setItem('ui_prefs', JSON.stringify({ sort: memoSortKey, folder: currentFolder, fav: favFilterActive }));
+}
+function restoreUiPrefs() {
+  let p = null;
+  try { p = JSON.parse(store.getItem('ui_prefs') || 'null'); } catch { /* 없음 */ }
+  if (!p) return;
+  if (['updatedAt', 'createdAt', 'title'].includes(p.sort)) { memoSortKey = p.sort; $('#memo-sort').value = p.sort; }
+  favFilterActive = !!p.fav;
+  $('#btn-fav-filter').classList.toggle('active', favFilterActive);
+  // 폴더가 없어졌거나 잠겨 있으면 '전체'로 (열 때마다 비밀번호를 묻지 않게)
+  if (p.folder === '__none__') currentFolder = '__none__';
+  else if (p.folder && folders.some((f) => f.id === p.folder) && !isFolderLocked(p.folder)) currentFolder = p.folder;
+}
+
+// ── 뒤로가기(휴대폰 제스처) — 맨 위 한 겹만 닫는다: 폴더 관리 > 목록(사이드바) > 열린 글 ──
+// 무엇이든 열려 있으면 기록 칸 하나를 쌓아 두고, 뒤로가기로 한 겹을 닫은 뒤에도 남은 게 있으면 다시 쌓는다.
+// 모두 닫히면(삭제 등 화면 조작으로) 쌓아 둔 칸을 거둔다. 그래서 목록만 열린 채 뒤로가기를 해도 앱이 꺼지지 않는다
+let skipNextPopstate = false;
+function sidebarIsOpen() { return $('#sidebar').classList.contains('open'); }
+function anyLayerOpen() { return !!fm || sidebarIsOpen() || editorContainer.style.display !== 'none'; }
+function layersChanged() {
+  const has = !!(history.state && history.state.app);
+  const open = anyLayerOpen();
+  if (open && !has) history.pushState({ app: true }, '');
+  else if (!open && has && !skipNextPopstate) { skipNextPopstate = true; history.back(); }
+}
+window.addEventListener('popstate', () => {
+  if (skipNextPopstate) { skipNextPopstate = false; layersChanged(); return; }
+  if (fm) closeFolderManager(true);
+  else if (sidebarIsOpen()) $('#sidebar').classList.remove('open');
+  else if (editorContainer.style.display !== 'none') { hideEditor(); currentId = null; renderMemoList(); }
+  layersChanged();
+});
 
 // ── OAuth (PKCE) ──
 function generateCodeVerifier() {
@@ -440,7 +568,6 @@ async function handleOAuthCallback() {
     const hState = hashParams.get('state');
     if (token && hState === sessionStorage.getItem('oauth_state')) {
       accessToken = token;
-      isOnline = true;
       store.setItem('dbx_token', token);
       sessionStorage.removeItem('oauth_state');
       history.replaceState(null, '', location.pathname);
@@ -451,7 +578,7 @@ async function handleOAuthCallback() {
   // Exchange code for tokens
   const codeVerifier = sessionStorage.getItem('code_verifier');
   try {
-    const res = await fetch('https://api.dropboxapi.com/oauth2/token', {
+    const res = await timedFetch('https://api.dropboxapi.com/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -466,7 +593,6 @@ async function handleOAuthCallback() {
     const data = await res.json();
     accessToken = data.access_token;
     refreshToken = data.refresh_token || null;
-    isOnline = true;
     store.setItem('dbx_token', accessToken);
     if (refreshToken) store.setItem('dbx_refresh', refreshToken);
     sessionStorage.removeItem('oauth_state');
@@ -481,7 +607,7 @@ async function handleOAuthCallback() {
 async function refreshAccessToken() {
   if (!refreshToken) return false;
   try {
-    const res = await fetch('https://api.dropboxapi.com/oauth2/token', {
+    const res = await timedFetch('https://api.dropboxapi.com/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -510,10 +636,36 @@ async function refreshAccessToken() {
 function logout() {
   accessToken = null;
   refreshToken = null;
-  isOnline = false;
   store.removeItem('dbx_token');
   store.removeItem('dbx_refresh');
   location.reload();
+}
+
+// Dropbox 로그인이 끝났다(갱신 토큰도 거절됨) — 새로고침 뒤 로그인 화면에서 까닭을 보여 준다
+// (예전엔 알림을 띄우자마자 새로고침돼 아무 설명 없이 로그인 화면만 나왔다). 기기에 저장된 글은 그대로다
+function authExpired() {
+  sessionStorage.setItem('logout_reason', 'Dropbox 로그인이 만료되었습니다. 다시 로그인하면 이 기기의 글을 그대로 이어서 맞춥니다.');
+  logout();
+  throw new Error('auth expired');
+}
+
+// 응답이 끝내 안 오면(지하철 등에서 통신이 멎음) 기다리지 않고 실패로 본다 — 안 그러면 동기화 줄이 막혀
+// 그 뒤 동기화가 모두 멈췄다. 큰 파일(한 파일 0.9MB·압축 받기)은 넉넉히
+const DBX_TIMEOUT = 30000;
+const DBX_TIMEOUT_BIG = 120000;
+function timedFetch(url, init = {}, ms = DBX_TIMEOUT) {
+  const ctl = new AbortController();
+  // 응답 머리만 받고 본문을 읽다 멎을 수도 있어, 끝날 때까지 시계를 끄지 않는다(다 읽은 뒤 끊어도 해가 없다)
+  setTimeout(() => ctl.abort(), ms);
+  return fetch(url, { ...init, signal: ctl.signal }).catch((e) => {
+    if (ctl.signal.aborted) { const t = new Error('timeout'); t.timeout = true; throw t; }
+    throw e;
+  });
+}
+
+// 409 응답 까닭 — Dropbox 공간이 가득 찼는지
+async function dbxSpaceFull(res) {
+  try { return /insufficient_space/.test(JSON.stringify(await res.clone().json())); } catch { return false; }
 }
 
 function confirmLogout() {
@@ -546,7 +698,7 @@ function dbxRetryDelay(res, attempt) {
 }
 
 async function dbxUpload(content, retried, attempt = 0) {
-  const res = await fetch('https://content.dropboxapi.com/2/files/upload', {
+  const res = await timedFetch('https://content.dropboxapi.com/2/files/upload', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + accessToken,
@@ -559,15 +711,15 @@ async function dbxUpload(content, retried, attempt = 0) {
       }),
     },
     body: content,
-  });
+  }, DBX_TIMEOUT_BIG);
   if (res.status === 401) {
     if (!retried && await refreshAccessToken()) {
       return dbxUpload(content, true, attempt);
     }
-    showToast('Dropbox 인증 만료. 다시 로그인해주세요.');
-    logout();
-    throw new Error('auth expired');
+    authExpired();
   }
+  // Dropbox 공간이 가득 찼다 — 다시 해도 안 된다
+  if (res.status === 409 && await dbxSpaceFull(res)) { const e = new Error('insufficient space'); e.space = true; throw e; }
   // 동시 쓰기 충돌(409)·요청 과다(429) → 잠깐 대기 후 재시도 (다른 창과 동시 저장 시)
   if (res.status === 409 && getRev()) {
     // 다른 기기가 먼저 올렸다 — 받아서 합친 뒤 다시 올려야 한다
@@ -586,21 +738,19 @@ async function dbxUpload(content, retried, attempt = 0) {
 }
 
 async function dbxDownload(retried, attempt = 0) {
-  const res = await fetch('https://content.dropboxapi.com/2/files/download', {
+  const res = await timedFetch('https://content.dropboxapi.com/2/files/download', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + accessToken,
       'Dropbox-API-Arg': JSON.stringify({ path: DROPBOX_FILE }),
     },
-  });
+  }, DBX_TIMEOUT_BIG);
   if (res.status === 409 || res.status === 404) { setRev(null); return null; } // 아직 파일 없음
   if (res.status === 401) {
     if (!retried && await refreshAccessToken()) {
       return dbxDownload(true, attempt);
     }
-    showToast('Dropbox 인증 만료. 다시 로그인해주세요.');
-    logout();
-    throw new Error('auth expired');
+    authExpired();
   }
   if (res.status === 429 && attempt < DBX_MAX_RETRY) {
     await dbxSleep(dbxRetryDelay(res, attempt));
@@ -614,7 +764,7 @@ async function dbxDownload(retried, attempt = 0) {
 
 // 파일 버전 번호(rev)만 묻는다 — 응답이 수백 바이트. 파일이 없으면 null
 async function dbxGetMetadata(retried, attempt = 0) {
-  const res = await fetch('https://api.dropboxapi.com/2/files/get_metadata', {
+  const res = await timedFetch('https://api.dropboxapi.com/2/files/get_metadata', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + accessToken,
@@ -627,9 +777,7 @@ async function dbxGetMetadata(retried, attempt = 0) {
     if (!retried && await refreshAccessToken()) {
       return dbxGetMetadata(true, attempt);
     }
-    showToast('Dropbox 인증 만료. 다시 로그인해주세요.');
-    logout();
-    throw new Error('auth expired');
+    authExpired();
   }
   if (res.status === 429 && attempt < DBX_MAX_RETRY) {
     await dbxSleep(dbxRetryDelay(res, attempt));
@@ -689,7 +837,7 @@ async function createBackup() {
 }
 
 async function dbxUploadTo(path, content, retried, attempt = 0) {
-  const res = await fetch('https://content.dropboxapi.com/2/files/upload', {
+  const res = await timedFetch('https://content.dropboxapi.com/2/files/upload', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + accessToken,
@@ -697,10 +845,10 @@ async function dbxUploadTo(path, content, retried, attempt = 0) {
       'Dropbox-API-Arg': JSON.stringify({ path, mode: 'add', mute: true }),
     },
     body: content,
-  });
+  }, DBX_TIMEOUT_BIG);
   if (res.status === 401) {
     if (!retried && await refreshAccessToken()) return dbxUploadTo(path, content, true, attempt);
-    logout(); throw new Error('auth expired');
+    authExpired();
   }
   if ((res.status === 429 || res.status === 409) && attempt < DBX_MAX_RETRY) {
     await dbxSleep(dbxRetryDelay(res, attempt));
@@ -711,7 +859,7 @@ async function dbxUploadTo(path, content, retried, attempt = 0) {
 }
 
 async function dbxListFolder(path, retried, attempt = 0) {
-  const res = await fetch('https://api.dropboxapi.com/2/files/list_folder', {
+  const res = await timedFetch('https://api.dropboxapi.com/2/files/list_folder', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + accessToken,
@@ -722,7 +870,7 @@ async function dbxListFolder(path, retried, attempt = 0) {
   if (res.status === 409 || res.status === 404) return [];
   if (res.status === 401) {
     if (!retried && await refreshAccessToken()) return dbxListFolder(path, true, attempt);
-    logout(); throw new Error('auth expired');
+    authExpired();
   }
   if (res.status === 429 && attempt < DBX_MAX_RETRY) {
     await dbxSleep(dbxRetryDelay(res, attempt));
@@ -734,7 +882,7 @@ async function dbxListFolder(path, retried, attempt = 0) {
 }
 
 async function dbxDelete(path, retried, attempt = 0) {
-  const res = await fetch('https://api.dropboxapi.com/2/files/delete_v2', {
+  const res = await timedFetch('https://api.dropboxapi.com/2/files/delete_v2', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + accessToken,
@@ -744,7 +892,7 @@ async function dbxDelete(path, retried, attempt = 0) {
   });
   if (res.status === 401) {
     if (!retried && await refreshAccessToken()) return dbxDelete(path, true, attempt);
-    logout(); throw new Error('auth expired');
+    authExpired();
   }
   if (res.status === 429 && attempt < DBX_MAX_RETRY) {
     await dbxSleep(dbxRetryDelay(res, attempt));
@@ -782,13 +930,15 @@ function markAutoBackupPending() {
   }
 }
 
+let autoBackupRunning = false;   // 앱 열기·돌아오기가 겹쳐도 백업은 한 번만
 async function checkAutoBackup() {
-  if (!accessToken) return;
+  if (!accessToken || autoBackupRunning) return;
   const today = getTodayKST();
   const lastDate = store.getItem('auto_backup_date');
   if (lastDate === today) return; // 오늘 이미 백업함
 
   // Dropbox에 오늘 날짜 자동 백업 파일이 있는지 확인
+  autoBackupRunning = true;
   try {
     const entries = await dbxListFolder(BACKUP_DIR);
     const todayTag = today.replace(/-/g, '');
@@ -802,6 +952,8 @@ async function checkAutoBackup() {
     await performAutoBackup(today);
   } catch (e) {
     console.error('Auto backup check error:', e);
+  } finally {
+    autoBackupRunning = false;
   }
 }
 
@@ -835,7 +987,7 @@ async function performAutoBackup(today) {
     showToast('자동 백업 완료');
   } catch (e) {
     console.error('Auto backup error:', e);
-    showToast('자동 백업 실패 — 다음에 앱을 열 때 다시 합니다');
+    showToast('자동 백업 실패 — 앱으로 다시 돌아올 때 다시 합니다');
   }
 }
 
@@ -1058,29 +1210,60 @@ async function legacyPullAndMerge() {
   // 합친 즉시 편집기에도 반영한다 — 글은 바뀌었는데 편집기에 옛 내용이 남아 있으면,
   // 그 위에 한 글자만 쳐도 옛 내용이 '방금 고친 최신'으로 올라간다(예전엔 올리기가 끝난 뒤에야 반영했다)
   refreshOpenMemo();
+  notifyConflicts();
   return remote === null;
 }
 
-// 동기화로 지금 열린 글이 바뀌었으면 편집기에 반영한다 (커서 위치는 최대한 유지)
+let remoteNoticeAt = 0;
+// 동기화로 지금 열린 글이 바뀌었으면 편집기에 반영한다 — 커서·스크롤은 바뀐 곳에 맞춰 그대로.
+// 다른 기기 내용이 들어오면 되돌리기 기록을 끊는다: 그 전 기록으로 되돌리면 방금 들어온 내용까지 지운 판이
+// 올라간다(예전엔 Ctrl+Z 한 번에 휴대폰에서 덧붙인 문단이 사라졌다)
 function refreshOpenMemo() {
   if (!currentId) return;
   const memo = memos.find((m) => m.id === currentId);
-  if (!memo) { currentId = null; hideEditor(); return; }
-  if (editor.value !== memo.content) {
-    const pos = Math.min(editor.selectionStart, memo.content.length);
-    editor.value = memo.content;
-    try { editor.setSelectionRange(pos, pos); } catch { /* 포커스 없으면 무시 */ }
+  if (!memo) {
+    currentId = null;
+    hideEditor();
+    renderMemoList();
+    showToast('다른 기기에서 지운 글이라 닫았습니다');
+    return;
+  }
+  const content = lf(memo.content);
+  if (editor.value !== content) {
+    const { p, oldEnd, newEnd } = diffRange(editor.value, content);
+    const move = (x) => (x >= oldEnd ? x + newEnd - oldEnd : x > p ? newEnd : x);
+    const s = move(editor.selectionStart), e = move(editor.selectionEnd);
+    const top = editor.scrollTop;
+    editor.value = content;
+    try { editor.setSelectionRange(s, e); } catch { /* 포커스 없으면 무시 */ }
+    editor.scrollTop = top;
+    undoStack = [];
+    redoStack = [];
+    undoGroupOpen = false;
     updateCharCount();
-    repaintOverlay();
+    // 알림은 30초에 한 번만 — 다른 기기에서 계속 쓰는 동안 몇 초마다 뜨지 않게
+    if (Date.now() - remoteNoticeAt > 30000) {
+      remoteNoticeAt = Date.now();
+      showToast('다른 기기에서 고친 내용을 반영했습니다');
+    }
   }
   if (titleInput.value !== memo.title) titleInput.value = memo.title;
   updateMemoDates(memo);
+  updateFolderSelect(memo.folder);
+  updateFavButton(memo);
+  if (!!memo.viewerMode !== viewerMode) applyViewerMode(!!memo.viewerMode);
+  updateConflictBar(memo);
+  repaintOverlay();   // 형광펜도 다른 기기에서 바뀌었을 수 있다
 }
 
+// 받기 + (보낼 게 있으면) 올리기. 이미 하고 있으면 그것을 함께 기다린다
+// (그사이 또 바뀌면 Dropbox 변경 알림이 다시 깨운다)
+let syncInFlight = null;
 function syncFromDropbox() {
   if (!accessToken) return Promise.resolve();
+  if (syncInFlight) return syncInFlight;
   setSyncStatus('syncing', '동기화 중...');
-  return queueSync(async () => {
+  const run = queueSync(async () => {
     try {
       const remoteMissing = await pullAndMerge();
       // Dropbox 에 파일이 없는데 이 기기도 비어 있으면, 빈 파일을 만들지 않고 멈춘다.
@@ -1093,14 +1276,85 @@ function syncFromDropbox() {
       }
       // 이 기기에만 있는 변경이 있을 때만 올린다 (매번 900KB를 올리지 않게)
       if (remoteMissing || isDirty()) await uploadNow();
-      setSyncStatus('synced', '동기화 완료');
+      settleSyncStatus('동기화 완료');
       renderAll();
       refreshOpenMemo();
     } catch (e) {
-      console.error('Sync error:', e);
-      setSyncStatus('error', '동기화 실패');
+      onSyncError(e);
     }
   });
+  syncInFlight = run.finally(() => { syncInFlight = null; });
+  return syncInFlight;
+}
+
+// ── 동기화 상태를 사실대로 ──
+// 올리기가 거절되거나(Dropbox 공간 부족·계속 겹침) 통신이 끊겨 못 보낸 게 남으면 '못 보냄'으로 두고 잠시 뒤
+// 저절로 다시 시도한다(15초 → 30초 → … 최대 5분). 예전엔 거절돼도 '동기화 완료'·'저장 완료'로 보였고 다시 하지도 않았다
+let syncProblem = null;   // null | 'network' | 'offline' | 'space' | 'rejected' | 'guard'
+let retryTimer = null;
+let retryDelay = 0;
+const PROBLEM_LABEL = {
+  network: '못 보냄 · 다시 시도 중',
+  offline: '오프라인 · 연결되면 보냄',
+  space: 'Dropbox 공간 부족',
+  rejected: '못 보냄 · 다시 시도 중',
+  guard: '동기화 멈춤',
+};
+function settleSyncStatus(okLabel = '동기화 완료') {
+  if (!accessToken) return;
+  if (!isDirty()) syncProblem = null;
+  else if (!navigator.onLine) syncProblem = 'offline';
+  if (syncProblem) {
+    setSyncStatus('error', PROBLEM_LABEL[syncProblem] || '못 보냄');
+    if (syncProblem !== 'offline' && syncProblem !== 'guard') scheduleRetry();
+    return;
+  }
+  retryDelay = 0;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  setSyncStatus('synced', okLabel);
+}
+function onSyncError(e) {
+  console.error('Sync error:', e);
+  if (e && e.message === 'auth expired') return;
+  syncProblem = e && e.space ? 'space' : navigator.onLine ? 'network' : 'offline';
+  if (syncProblem === 'space') warnSpace();
+  if (!isDirty()) {
+    // 보낼 것은 없고 받기만 실패했다 — 표시하고 잠시 뒤 다시
+    setSyncStatus('error', syncProblem === 'offline' ? '오프라인' : '동기화 실패');
+    if (syncProblem !== 'offline') scheduleRetry();
+    return;
+  }
+  settleSyncStatus();
+}
+function scheduleRetry() {
+  if (retryTimer) return;
+  retryDelay = Math.min(retryDelay ? retryDelay * 2 : 15000, 300000);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (accessToken && navigator.onLine) syncFromDropbox();
+  }, retryDelay);
+}
+let spaceWarned = false;
+function warnSpace() {
+  if (spaceWarned) return;
+  spaceWarned = true;
+  showToast('Dropbox 저장 공간이 가득 차 올리지 못했습니다. 공간을 비우면 자동으로 다시 보냅니다', { duration: 10000 });
+}
+
+// 편집 화면 아래(글자 수 옆)의 동기화 표시 — 사이드바를 열지 않아도(휴대폰) 보낸 상태를 알 수 있게
+function updateSyncIndicator() {
+  const el = document.getElementById('sync-dot');
+  if (!el) return;
+  let cls = 'ok', text = '동기화됨';
+  if (!accessToken) { cls = 'local'; text = '기기에만 저장'; }
+  else if (freshCheck) { cls = 'busy'; text = '최신 내용 확인 중'; }
+  else if (syncStatus.classList.contains('syncing')) { cls = 'busy'; text = '동기화 중'; }
+  else if (syncProblem) { cls = 'bad'; text = PROBLEM_LABEL[syncProblem] || '못 보냄'; }
+  else if (isDirty()) { cls = 'wait'; text = '저장됨'; }
+  el.className = cls;
+  el.textContent = text;
+  el.title = cls === 'bad' ? '누르면 지금 다시 보냅니다' : cls === 'wait' ? '이 기기에 저장됨 — 곧 Dropbox 로 보냅니다' : '';
 }
 
 // 이 기기에 내용이 하나도 없는 상태인가(글·폴더·템플릿·휴지통 모두 빔)
@@ -1111,7 +1365,9 @@ function isLocalEmpty() {
 // force=true 는 사용자가 직접 전부 지운 경우처럼 빈 상태를 일부러 올릴 때만
 function syncToDropbox(force) {
   if (!accessToken) return Promise.resolve();
-  return queueSync(() => uploadNow(force));
+  return queueSync(() => uploadNow(force)).then(
+    () => settleSyncStatus('동기화 완료'),
+    (e) => { onSyncError(e); throw e; });
 }
 
 async function uploadNow(force, retriedConflict) {
@@ -1145,6 +1401,7 @@ async function uploadNow(force, retriedConflict) {
     throw e;
   }
   markSynced(base, seq === changeSeq && !localSaveTimer);
+  syncProblem = null;
   lastUploadAt = Date.now();
   if (isDirty()) pendingSince = lastUploadAt;   // 올리는 동안 또 고쳤으면 그때부터 다시 센다
 }
@@ -1187,6 +1444,11 @@ function mergeMemos(local, remote) {
     if ((loser.metaAt || 0) > (winner.metaAt || 0)) {
       winner = { ...winner, favorite: loser.favorite, favoritedAt: loser.favoritedAt, viewerMode: loser.viewerMode, metaAt: loser.metaAt };
     }
+    // 폴더도 본문과 따로 — 늦게 옮긴 쪽을 따른다(예전엔 다른 기기가 본문을 고쳤으면 그 판이 통째로 남아
+    // 이 기기에서 옮긴 폴더가 소리 없이 되돌아갔다)
+    if ((loser.folderAt || 0) > (winner.folderAt || 0)) {
+      winner = { ...winner, folder: loser.folder, folderAt: loser.folderAt };
+    }
     map.set(r.id, winner);
     if (pick.conflict && !copied.has(loser.id + '|' + loser.updatedAt)) {
       extras.push(conflictCopy(loser));
@@ -1195,9 +1457,115 @@ function mergeMemos(local, remote) {
   }
   for (const m of local) if (!map.has(m.id)) map.set(m.id, m);
   const permDelIds = new Set(deletedIds.map((d) => d.id || d));
+  newConflicts.push(...extras.map((c) => c.id));
   return Array.from(map.values()).concat(extras)
     .filter((m) => !m.deleted && !permDelIds.has(m.id))
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+// 합치다 충돌본이 생겼으면 알린다(예전엔 목록에서 우연히 봐야 알았다). '보기'를 누르면 그 충돌본을 연다 —
+// 충돌본 위의 '원본과 비교'로 무엇이 다른지 문단(줄)마다 볼 수 있다
+let newConflicts = [];
+function notifyConflicts() {
+  const ids = newConflicts.filter((id) => memos.some((m) => m.id === id));
+  newConflicts = [];
+  if (!ids.length) return;
+  showToast(`같은 글을 두 기기에서 고쳐 충돌본 ${ids.length}개를 남겼습니다`, {
+    action: '보기',
+    duration: 10000,
+    onAction: () => {
+      const m = memos.find((x) => x.id === ids[0]);
+      if (m) { loadMemoInEditor(m); $('#sidebar').classList.remove('open'); }
+    },
+  });
+}
+
+// 충돌본을 열면 제목 아래에 '원본과 비교' 막대를 보인다(원본이 남아 있을 때만)
+function updateConflictBar(memo) {
+  const bar = document.getElementById('conflict-bar');
+  if (!bar) return;
+  const orig = memo && memo.conflictOf && memos.find((m) => m.id === memo.conflictOf);
+  bar.style.display = orig ? 'flex' : 'none';
+}
+
+// 두 글을 문단(=엔터로 나뉜 줄)마다 견준다 → [{ t: 'same'|'del'|'add', s }]. del = 원본에만, add = 충돌본에만
+function diffLines(a, b) {
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const A = a.slice(pre, a.length - suf), B = b.slice(pre, b.length - suf);
+  const out = a.slice(0, pre).map((s) => ({ t: 'same', s }));
+  if (A.length * B.length > 4e6) {
+    // 너무 길면 가운데는 통째로 견준다(드문 경우)
+    A.forEach((s) => out.push({ t: 'del', s }));
+    B.forEach((s) => out.push({ t: 'add', s }));
+  } else {
+    // 가장 긴 공통 부분(LCS) 표를 뒤에서부터 채운 뒤 앞에서부터 따라간다
+    const n = A.length, m = B.length;
+    const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    }
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (A[i] === B[j]) { out.push({ t: 'same', s: A[i] }); i++; j++; }
+      else if (L[i + 1][j] >= L[i][j + 1]) out.push({ t: 'del', s: A[i++] });
+      else out.push({ t: 'add', s: B[j++] });
+    }
+    while (i < n) out.push({ t: 'del', s: A[i++] });
+    while (j < m) out.push({ t: 'add', s: B[j++] });
+  }
+  b.slice(b.length - suf).forEach((s) => out.push({ t: 'same', s }));
+  return out;
+}
+
+// 충돌본과 원본을 문단마다 견줘 보여 준다 — 원본에만 있는 문단 / 충돌본에만 있는 문단. 같은 문단이 길게 이어지면 접는다
+function showConflictCompare(copyId) {
+  const copy = memos.find((m) => m.id === copyId);
+  const orig = copy && copy.conflictOf && memos.find((m) => m.id === copy.conflictOf);
+  if (!copy || !orig) { showToast('원본 글이 없습니다'); return; }
+  const rows = diffLines(lf(orig.content).split('\n'), lf(copy.content).split('\n'));
+  const changed = rows.filter((r) => r.t !== 'same').length;
+  const line = (r) => `<div class="cmp-line cmp-${r.t}">${r.s ? escapeHtml(r.s) : '&nbsp;'}</div>`;
+  let html = '';
+  for (let i = 0; i < rows.length;) {
+    if (rows[i].t !== 'same') { html += line(rows[i++]); continue; }
+    let j = i;
+    while (j < rows.length && rows[j].t === 'same') j++;
+    const run = rows.slice(i, j);
+    // 바뀐 곳 앞뒤 두 문단만 남기고 접는다
+    const head = i === 0 ? 0 : 2, tail = j === rows.length ? 0 : 2;
+    if (run.length > head + tail + 1) {
+      html += run.slice(0, head).map(line).join('') +
+        `<div class="cmp-fold">같은 문단 ${run.length - head - tail}개</div>` + run.slice(run.length - tail).map(line).join('');
+    } else html += run.map(line).join('');
+    i = j;
+  }
+  const baseTitle = (copy.title || '').replace(/ \(충돌본 [^)]*\)$/, '');
+  const titleNote = baseTitle !== (orig.title || '') ? `<p class="cmp-title">제목: 원본 "${escapeHtml(orig.title || '')}" · 충돌본 "${escapeHtml(baseTitle)}"</p>` : '';
+  const o = document.createElement('div');
+  o.className = 'modal-overlay';
+  o.innerHTML = `
+    <div class="modal-box cmp-box">
+      <div class="trash-head"><h3>원본과 비교</h3><button class="fm-icon-btn" data-cmp="close" type="button" title="닫기">${ico('close')}</button></div>
+      <p class="cmp-legend"><span class="cmp-key cmp-del">원본에만</span><span class="cmp-key cmp-add">충돌본에만</span>${changed ? '' : '<span>본문이 같습니다</span>'}</p>
+      ${titleNote}
+      <div class="cmp-body">${html}</div>
+      <div class="cmp-foot">
+        <button class="btn btn-secondary" data-cmp="orig" type="button">원본 열기</button>
+        <button class="btn btn-primary" data-cmp="trash" type="button">충돌본 지우기</button>
+      </div>
+    </div>`;
+  document.body.appendChild(o);
+  o.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cmp]');
+    if (e.target !== o && !b) return;
+    o.remove();
+    if (!b) return;
+    if (b.dataset.cmp === 'orig') loadMemoInEditor(orig);
+    else if (b.dataset.cmp === 'trash') deleteMemo(copy.id);   // 휴지통으로(되살릴 수 있다)
+  });
 }
 
 function mergeFolders(local, remote) {
@@ -1253,6 +1621,7 @@ function updateSaveSyncTimes() {
   const syncedEl = $('#last-synced-time');
   if (savedEl) savedEl.textContent = '최근 저장 ' + fmtFullTime(store.getItem('last_saved_at'));
   if (syncedEl) syncedEl.textContent = '최근 동기화 ' + fmtFullTime(store.getItem('last_synced_at'));
+  updateSyncIndicator();
 }
 
 // base: 원격과 같아진 상태(올린 그 순간의 상태). 없으면 지금 상태. clean=false면 그 뒤 고친 게 있어 '보낼 것'을 남긴다
@@ -1703,22 +2072,25 @@ function deleteFolder(id) {
   const folder = folders.find((f) => f.id === id);
   const childFolders = getDescendantIds(id).map((cid) => folders.find((f) => f.id === cid)).filter(Boolean);
   const allIds = [id, ...childFolders.map((f) => f.id)];
+  // 함께 지운 것끼리 같은 표(batch)를 단다 — 폴더를 복원하면 안의 하위 폴더·글도 함께 돌아오게
+  const now = Date.now();
+  const batch = id + '@' + now;
   // 폴더 + 하위 폴더 내 메모들을 휴지통으로 이동
   const folderMemos = memos.filter((m) => allIds.includes(m.folder));
   for (const m of folderMemos) {
-    trash.push({ type: 'memo', data: { ...m }, deletedAt: Date.now() });
+    trash.push({ type: 'memo', data: { ...m }, deletedAt: now, batch });
   }
   memos = memos.filter((m) => !allIds.includes(m.folder));
   // 하위 폴더 휴지통으로
   for (const cf of childFolders) {
-    trash.push({ type: 'folder', data: { ...cf }, deletedAt: Date.now() });
+    trash.push({ type: 'folder', data: { ...cf }, deletedAt: now, batch });
   }
   // 폴더 자체도 휴지통으로
   if (folder) {
-    trash.push({ type: 'folder', data: { ...folder }, deletedAt: Date.now() });
+    trash.push({ type: 'folder', data: { ...folder }, deletedAt: now, batch });
   }
   folders = folders.filter((f) => !allIds.includes(f.id));
-  if (allIds.includes(currentFolder)) currentFolder = null;
+  if (allIds.includes(currentFolder)) { currentFolder = null; saveUiPrefs(); }
   if (currentId && folderMemos.some((m) => m.id === currentId)) {
     currentId = null;
     hideEditor();
@@ -2010,8 +2382,8 @@ function openFolderManager(focusId) {
   fm.body.addEventListener('scroll', () => closeFmMenu());
   document.addEventListener('keydown', onFmKeydown);
 
-  // 휴대폰 뒤로가기 제스처가 앱·글 대신 이 화면을 먼저 닫도록 기록 한 칸을 쌓는다
-  history.pushState({ folderMgr: true }, '');
+  // 휴대폰 뒤로가기 제스처가 앱·글 대신 이 화면을 먼저 닫게 한다(layersChanged)
+  layersChanged();
   renderFolderManager(true);
   flashFolderRow(focusId);
 }
@@ -2023,7 +2395,7 @@ function closeFolderManager(fromPopstate) {
   document.removeEventListener('keydown', onFmKeydown);
   fm.el.remove();
   fm = null;
-  if (!fromPopstate && history.state && history.state.folderMgr) { skipNextPopstate = true; history.back(); }
+  if (!fromPopstate) layersChanged();
 }
 
 function onFmKeydown(e) {
@@ -2299,6 +2671,7 @@ function openFolderFromManager(id) {
   closeFolderManager();
   const go = () => {
     currentFolder = id;
+    saveUiPrefs();
     renderAll();
     if (!selectMode) $('#folder-dropdown').style.display = 'none';
     if (window.innerWidth <= 768) $('#sidebar').classList.add('open');
@@ -2516,19 +2889,26 @@ function endFmDrag(commit) {
 }
 
 // ── Memo CRUD ──
-function createMemo() {
-  // 새 글이 들어갈 폴더 결정 (cleanupEmptyMemo가 currentId를 비우기 전에 캡처)
-  // 1) 특정 폴더를 연 상태면 그 폴더
-  // 2) 전체/미분류 보기지만 지금 보고 있는 글이 어떤 폴더에 속하면 그 폴더
-  // 3) 둘 다 아니면 폴더 없음
+// 새 글이 들어갈 폴더 (cleanupEmptyMemo가 currentId를 비우기 전에 정한다)
+// 1) 특정 폴더를 연 상태면 그 폴더
+// 2) 전체/미분류 보기지만 지금 보고 있는 글이 어떤 폴더에 속하면 그 폴더
+// 3) 둘 다 아니면 폴더 없음
+function newMemoFolder() {
   let targetFolder = (currentFolder && currentFolder !== '__none__') ? currentFolder : null;
   if (!targetFolder && currentId) {
     const cur = memos.find((m) => m.id === currentId);
     if (cur && cur.folder) targetFolder = cur.folder;
   }
+  return targetFolder;
+}
+
+// opts(새 창에서만): { id, folder } — 단추·빈 화면에서 부르면 클릭 신호가 들어오므로 무시한다
+function createMemo(opts) {
+  const o = opts && !(opts instanceof Event) ? opts : {};
+  const targetFolder = 'folder' in o ? o.folder : newMemoFolder();
   cleanupEmptyMemo();
   const memo = {
-    id: crypto.randomUUID(),
+    id: o.id || crypto.randomUUID(),
     title: '',
     content: '',
     folder: targetFolder,
@@ -2543,6 +2923,15 @@ function createMemo() {
   titleInput.focus();
   $('#sidebar').classList.remove('open');
   scheduleSyncToDropbox();
+}
+
+// Ctrl+N: 글 쓰기 전용 새 창(목록 더블클릭으로 여는 창과 같은 모양)을 열어 거기서 새 글을 쓴다.
+// 새 글이 들어갈 폴더는 이 창에서 정해 넘긴다(연 폴더 → 보고 있던 글의 폴더). 새 창이 막혔으면 이 창에서
+function openNewNoteWindow() {
+  const folder = newMemoFolder();
+  const url = location.pathname + '?new=1' + (folder ? '&folder=' + encodeURIComponent(folder) : '') + MODE_QUERY;
+  const w = window.open(url, '_blank', 'width=400,height=700');
+  if (!w) createMemo();
 }
 
 function deleteMemo(id) {
@@ -2563,7 +2952,9 @@ function deleteMemo(id) {
 
 function confirmDelete() {
   if (!currentId) return;
-  const memo = memos.find((m) => m.id === currentId);
+  // 지울 글은 지금 정한다 — 확인하는 사이 동기화로 글이 닫혀도 엉뚱한 일이 없게
+  const id = currentId;
+  const memo = memos.find((m) => m.id === id);
   const title = escapeHtml(memo?.title || '제목 없음');
 
   // 1차 확인
@@ -2584,135 +2975,233 @@ function confirmDelete() {
     o2.addEventListener('click', (e) => { if (e.target === o2) o2.remove(); });
     o2.querySelector('#del-ok2').onclick = () => {
       o2.remove();
-      deleteMemo(currentId);
+      if (memos.some((m) => m.id === id)) deleteMemo(id);
     };
   };
 }
 
-// ── Trash ──
-function showTrashView() {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-
-  function renderTrashList() {
-    if (trash.length === 0) {
-      return '<p style="color:var(--text2);font-size:0.9rem;">휴지통이 비어 있습니다.</p>';
-    }
-    return trash.map((item, i) => {
-      const icon = item.type === 'folder' ? '📁' : '📝';
-      const name = item.type === 'folder' ? item.data.name : (item.data.title || formatCreatedAt(item.data.createdAt) + ' 새 글');
-      const date = formatDate(item.deletedAt);
-      const preview = item.type === 'memo' ? escapeHtml((item.data.content || '').substring(0, 200)) : '';
-      return `<div class="trash-item" style="border-bottom:1px solid var(--border);font-size:0.85rem;">
-        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;" data-preview="${i}">
-          <span>${icon}</span>
-          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
-          <span style="font-size:0.7rem;color:var(--text2);flex-shrink:0;">${date}</span>
-          <button class="btn btn-secondary" style="padding:3px 8px;font-size:0.75rem;" data-restore="${i}">복원</button>
-          <button class="btn btn-primary" style="padding:3px 8px;font-size:0.75rem;" data-permadel="${i}">삭제</button>
-        </div>
-        ${item.type === 'memo' ? '<div class="trash-preview" id="trash-preview-' + i + '" style="display:none;padding:6px 10px 10px 36px;font-size:0.8rem;color:var(--text2);white-space:pre-wrap;word-break:break-word;max-height:150px;overflow-y:auto;background:var(--bg);">' + (preview || '<i>내용 없음</i>') + '</div>' : ''}
-      </div>`;
-    }).join('');
-  }
-
-  function render() {
-    overlay.innerHTML = `
-      <div class="modal-box" style="max-width:480px;max-height:70vh;display:flex;flex-direction:column;text-align:left;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-          <h3 style="font-size:1rem;">🗑 휴지통</h3>
-          ${trash.length > 0 ? '<button class="btn btn-primary" id="trash-empty" style="padding:4px 10px;font-size:0.75rem;">비우기</button>' : ''}
-        </div>
-        <div style="overflow-y:auto;flex:1;">${renderTrashList()}</div>
-        <div style="text-align:center;margin-top:12px;">
-          <button class="btn btn-secondary" id="trash-close">닫기</button>
-        </div>
-      </div>
-    `;
-
-    overlay.querySelector('#trash-close').onclick = () => overlay.remove();
-
-    const emptyBtn = overlay.querySelector('#trash-empty');
-    if (emptyBtn) {
-      emptyBtn.onclick = () => {
-        if (confirm('휴지통을 비우시겠습니까? 영구적으로 삭제됩니다.')) {
-          for (const t of trash) deletedIds.push({ id: t.data.id, at: Date.now() });
-          trash = [];
-          saveLocalData();
-          syncToDropbox().catch(() => {});
-          render();
-          showToast('휴지통을 비웠습니다');
-        }
-      };
-    }
-
-    overlay.querySelectorAll('[data-preview]').forEach((row) => {
-      row.onclick = (e) => {
-        if (e.target.closest('[data-restore]') || e.target.closest('[data-permadel]')) return;
-        const idx = row.dataset.preview;
-        const prev = overlay.querySelector('#trash-preview-' + idx);
-        if (prev) prev.style.display = prev.style.display === 'none' ? 'block' : 'none';
-      };
-    });
-
-    overlay.querySelectorAll('[data-restore]').forEach((btn) => {
-      btn.onclick = () => {
-        const idx = parseInt(btn.dataset.restore);
-        restoreFromTrash(idx);
-        render();
-      };
-    });
-
-    overlay.querySelectorAll('[data-permadel]').forEach((btn) => {
-      btn.onclick = () => {
-        const idx = parseInt(btn.dataset.permadel);
-        const item = trash[idx];
-        const name = item.type === 'folder' ? item.data.name : (item.data.title || '제목 없음');
-        if (confirm(`"${name}"을(를) 영구 삭제하시겠습니까?`)) {
-          deletedIds.push({ id: item.data.id, at: Date.now() });
-          trash.splice(idx, 1);
-          saveLocalData();
-          syncToDropbox().catch(() => {});
-          render();
-          showToast('영구 삭제되었습니다');
-        }
-      };
-    });
-
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-  }
-
-  document.body.appendChild(overlay);
-  render();
+// 앱 모양의 확인 창(브라우저 기본 확인 창 대신) — Esc·바깥 누르기 = 취소
+function askConfirm(message, okLabel, onOk) {
+  const o = document.createElement('div');
+  o.className = 'modal-overlay';
+  o.innerHTML = `<div class="modal-box"><p>${message}</p><button class="btn btn-secondary" data-ask="no" type="button">취소</button> <button class="btn btn-primary" data-ask="yes" type="button">${okLabel}</button></div>`;
+  document.body.appendChild(o);
+  o.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-ask]');
+    if (e.target !== o && !b) return;
+    o.remove();
+    if (b && b.dataset.ask === 'yes') onOk();
+  });
+  o.querySelector('[data-ask="yes"]').focus();
 }
 
-function restoreFromTrash(index) {
-  const item = trash[index];
-  if (!item) return;
-  if (item.type === 'memo') {
-    // 원래 폴더가 아직 존재하면 그 폴더로, 없으면 미분류로 복원
-    if (item.data.folder && !folders.some((f) => f.id === item.data.folder)) {
-      item.data.folder = null;
-    }
-    item.data.updatedAt = Date.now();
-    memos.unshift(item.data);
-  } else if (item.type === 'folder') {
-    // 같은 이름의 폴더가 이미 있으면 이름 뒤에 (복원) 추가
-    const exists = folders.some((f) => f.name === item.data.name);
-    if (exists) item.data.name += ' (복원)';
-    // 부모 폴더가 없으면 최상위로 복원
-    if (item.data.parentId && (!folders.some((f) => f.id === item.data.parentId) || folderDepth(item.data.parentId) >= MAX_FOLDER_DEPTH)) {
-      item.data.parentId = null;
-    }
-    item.data.sortOrder = nextSortOrder(item.data.parentId || null);
-    item.data.updatedAt = Date.now();
-    folders.push(item.data);
+// ── Trash ──
+// 항목은 순번이 아니라 '종류:id'로 가린다 — 창을 연 사이 동기화로 목록이 바뀌어도 누른 그 항목에만 적용된다
+// (예전엔 순번으로 찾아, 동기화가 끼면 엉뚱한 글이 복원·영구 삭제됐다). 열려 있는 동안 바뀌면 목록을 다시 그린다
+let trashView = null;
+const trashKey = (t) => t.type + ':' + (t.data && t.data.id);
+function findTrash(key) { return trash.find((t) => trashKey(t) === key); }
+function trashName(t) {
+  return t.type === 'folder' ? (t.data.name || '이름 없는 폴더') : (t.data.title || formatCreatedAt(t.data.createdAt) + ' 새 글');
+}
+// 함께 지운 무리(폴더를 지울 때 같이 들어간 하위 폴더·글). 표(batch)가 없던 옛 항목은 지운 시각이 5초 안이면 같은 무리로 본다
+function sameTrashBatch(a, b) {
+  return a.batch ? a.batch === b.batch : !b.batch && Math.abs((a.deletedAt || 0) - (b.deletedAt || 0)) <= 5000;
+}
+// 폴더 항목과 함께 돌아올 하위 폴더(부모부터 차례로)·글
+function trashBundle(item) {
+  const order = [item];
+  const alive = new Set([item.data.id]);
+  const sub = trash.filter((t) => t.type === 'folder' && t !== item && sameTrashBatch(item, t));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const t of sub) if (!order.includes(t) && alive.has(t.data.parentId)) { order.push(t); alive.add(t.data.id); grew = true; }
   }
-  trash.splice(index, 1);
+  const notes = trash.filter((t) => t.type === 'memo' && sameTrashBatch(item, t) && alive.has(t.data.folder));
+  return { folders: order, memos: notes };
+}
+
+function showTrashView() {
+  if (trashView) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const open = new Set();   // 미리 보기를 펼친 항목
+  let filter = '';
+  overlay.innerHTML = `
+    <div class="modal-box trash-box">
+      <div class="trash-head">
+        <h3>${ico('trash')}<span>휴지통</span><span class="trash-n"></span></h3>
+        <button class="fm-icon-btn" data-tact="close" type="button" title="닫기">${ico('close')}</button>
+      </div>
+      <input class="trash-filter" type="search" placeholder="휴지통에서 찾기" hidden>
+      <div class="trash-list"></div>
+      <div class="trash-foot">
+        <button class="trash-link" data-tact="restore-all" type="button">모두 복원</button>
+        <button class="trash-link danger" data-tact="empty" type="button">비우기</button>
+      </div>
+    </div>`;
+  const list = overlay.querySelector('.trash-list');
+  const input = overlay.querySelector('.trash-filter');
+
+  const row = (t) => {
+    const key = trashKey(t);
+    const isFolder = t.type === 'folder';
+    let meta = formatDate(t.deletedAt) + ' 지움';
+    if (isFolder) {
+      const b = trashBundle(t);
+      const extra = [b.folders.length > 1 ? `하위 폴더 ${b.folders.length - 1}개` : '', b.memos.length ? `글 ${b.memos.length}편` : ''].filter(Boolean).join('·');
+      if (extra) meta += ' · ' + extra + ' 함께';
+    } else if (t.data.folder) {
+      const f = folders.find((x) => x.id === t.data.folder);
+      if (f) meta += ' · ' + escapeHtml(f.name);
+    }
+    const preview = isFolder ? '' : `<div class="trash-preview"${open.has(key) ? '' : ' hidden'}>${escapeHtml((t.data.content || '').substring(0, 300)) || '<i>내용 없음</i>'}</div>`;
+    return `<div class="trash-item" data-key="${escapeHtml(key)}">
+      <div class="trash-row">
+        <div class="trash-main"${isFolder ? '' : ' data-tact="preview"'}>
+          ${ico(isFolder ? 'folder' : 'note')}
+          <div class="trash-text"><div class="trash-name">${escapeHtml(trashName(t))}</div><div class="trash-meta">${meta}</div></div>
+        </div>
+        <button class="btn btn-secondary trash-btn" data-tact="restore" type="button">복원</button>
+        <button class="trash-btn trash-del" data-tact="delete" type="button" title="영구 삭제">삭제</button>
+      </div>
+      ${preview}
+    </div>`;
+  };
+
+  const renderList = () => {
+    const q = filter.trim().toLowerCase();
+    const items = [...trash].sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0))   // 방금 지운 것이 위
+      .filter((t) => !q || trashName(t).toLowerCase().includes(q) || (t.data.content || '').toLowerCase().includes(q));
+    overlay.querySelector('.trash-n').textContent = trash.length ? String(trash.length) : '';
+    input.hidden = trash.length <= 8 && !filter;
+    list.innerHTML = trash.length === 0
+      ? '<p class="trash-empty">휴지통이 비어 있습니다.</p>'
+      : items.length ? items.map(row).join('') : '<p class="trash-empty">찾는 항목이 없습니다.</p>';
+    overlay.querySelector('.trash-foot').hidden = trash.length === 0;
+  };
+
+  const close = () => { overlay.remove(); trashView = null; };
+  overlay._close = close;
+  trashView = { renderList };
+
+  input.addEventListener('input', () => { filter = input.value; renderList(); });
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) { close(); return; }
+    const b = e.target.closest('[data-tact]');
+    if (!b) return;
+    const act = b.dataset.tact;
+    if (act === 'close') { close(); return; }
+    if (act === 'empty') {
+      askConfirm(`휴지통의 ${trash.length}개 항목을 모두 영구 삭제할까요?<br><span class="ask-note">되돌릴 수 없습니다</span>`, '비우기', () => {
+        for (const t of trash) deletedIds.push({ id: t.data.id, at: Date.now() });
+        trash = [];
+        saveLocalData();
+        syncToDropbox().catch(() => {});
+        renderAll();
+        showToast('휴지통을 비웠습니다');
+      });
+      return;
+    }
+    if (act === 'restore-all') {
+      askConfirm(`휴지통의 ${trash.length}개 항목을 모두 복원할까요?`, '모두 복원', () => {
+        const n = restoreAllTrash();
+        showToast(`${n}개를 복원했습니다`);
+      });
+      return;
+    }
+    const item = b.closest('.trash-item');
+    const key = item && item.dataset.key;
+    if (!key) return;
+    if (act === 'preview') {
+      if (open.has(key)) open.delete(key); else open.add(key);
+      const pv = item.querySelector('.trash-preview');
+      if (pv) pv.hidden = !open.has(key);
+      return;
+    }
+    const t = findTrash(key);
+    if (!t) { showToast('이미 다른 곳에서 처리된 항목입니다'); renderList(); return; }
+    if (act === 'restore') {
+      const r = restoreTrashItem(t);
+      saveLocalData();
+      renderAll();
+      scheduleSyncToDropbox();
+      showToast(r.folders ? `폴더${r.folders > 1 ? ' ' + r.folders + '개' : ''}${r.memos ? '와 글 ' + r.memos + '편' : ''}을 복원했습니다`
+        : r.toNone ? '원래 폴더가 없어 미분류로 복원했습니다' : '복원되었습니다');
+    } else if (act === 'delete') {
+      askConfirm(`"${escapeHtml(trashName(t))}"을(를) 영구 삭제할까요?<br><span class="ask-note">되돌릴 수 없습니다</span>`, '영구 삭제', () => {
+        const cur = findTrash(key);
+        if (!cur) return;
+        deletedIds.push({ id: cur.data.id, at: Date.now() });
+        trash = trash.filter((x) => x !== cur);
+        saveLocalData();
+        syncToDropbox().catch(() => {});
+        renderAll();
+        showToast('영구 삭제되었습니다');
+      });
+    }
+  });
+
+  document.body.appendChild(overlay);
+  renderList();
+}
+
+// 휴지통 항목 하나 되살리기(저장·다시 그리기는 부른 쪽에서). 폴더면 함께 지운 하위 폴더·글도 같이
+function restoreTrashItem(item) {
+  const now = Date.now();
+  const r = { memos: 0, folders: 0, toNone: false };
+  if (item.type === 'memo') {
+    const d = item.data;
+    // 원래 폴더가 아직 존재하면 그 폴더로, 없으면 미분류로 복원
+    if (d.folder && !folders.some((f) => f.id === d.folder)) { d.folder = null; d.folderAt = now; r.toNone = true; }
+    d.updatedAt = now;
+    memos.unshift(d);
+    trash = trash.filter((x) => x !== item);
+    r.memos = 1;
+    return r;
+  }
+  const b = trashBundle(item);
+  const root = item.data;
+  // 같은 이름의 폴더가 이미 있으면 이름 뒤에 (복원) 추가
+  if (folders.some((f) => f.name === root.name)) root.name += ' (복원)';
+  // 부모 폴더가 없거나, 하위까지 합쳐 3단계를 넘으면 최상위로 복원
+  const rel = new Map([[root.id, 1]]);
+  for (const t of b.folders.slice(1)) rel.set(t.data.id, (rel.get(t.data.parentId) || 1) + 1);
+  const height = Math.max(...rel.values());
+  if (root.parentId && (!folders.some((f) => f.id === root.parentId) || folderDepth(root.parentId) + height > MAX_FOLDER_DEPTH)) {
+    root.parentId = null;
+  }
+  for (const t of b.folders) {
+    t.data.sortOrder = nextSortOrder(t.data.parentId || null);
+    t.data.updatedAt = now;
+    folders.push(t.data);
+  }
+  for (const t of b.memos) {
+    t.data.updatedAt = now;
+    memos.unshift(t.data);
+  }
+  const back = new Set([...b.folders, ...b.memos]);
+  trash = trash.filter((x) => !back.has(x));
+  r.folders = b.folders.length;
+  r.memos = b.memos.length;
+  return r;
+}
+
+// 휴지통 전부 되살리기 — 폴더부터(부모가 휴지통에 없는 것부터), 그다음 글. 되살린 개수를 돌려준다
+function restoreAllTrash() {
+  let n = 0;
+  for (let guard = 0; guard < 1000; guard++) {
+    const inTrash = new Set(trash.filter((t) => t.type === 'folder').map((t) => t.data.id));
+    const next = trash.find((t) => t.type === 'folder' && !inTrash.has(t.data.parentId)) || trash.find((t) => t.type === 'folder');
+    if (!next) break;
+    const r = restoreTrashItem(next);
+    n += r.folders + r.memos;
+  }
+  for (const t of [...trash]) { if (t.type === 'memo') { restoreTrashItem(t); n++; } }
   saveLocalData();
   renderAll();
   scheduleSyncToDropbox();
-  showToast('복원되었습니다');
+  return n;
 }
 
 // ── Favorite ──
@@ -2743,9 +3232,15 @@ function updateFavButton(memo) {
 // (A창에서 수정 → B창이 즉시 반영. 단, 이 창에서 직접 입력 중이면 본문은 건드리지 않음)
 function onExternalStorageChange(e) {
   const key = store.nameOf(e.key);   // 다른 칸(시범 운전 등)의 신호는 무시
-  if (key === 'last_saved_at' || key === 'last_synced_at') { updateSaveSyncTimes(); return; }
+  if (key === 'last_saved_at' || key === 'last_synced_at' || key === 'pending_sync') { updateSaveSyncTimes(); return; }
   if (key !== 'memos') return; // saveLocalData는 항상 memos를 함께 저장하므로 이 키만 보면 됨
+  // 이 창에 열린 빈 새 글(아직 아무것도 안 씀)은 다른 창이 '빈 글 정리'로 지워도 이 창에선 남긴다 —
+  // Ctrl+N 새 창에서 쓰기 시작하기 전에 목록 창이 정리해 버리면 새 창의 글이 닫혔다
+  const mine = currentId && memos.find((m) => m.id === currentId);
   loadLocalData();
+  if (mine && isBlankMemo(mine) && !memos.some((m) => m.id === mine.id) && !trash.some((t) => t.data && t.data.id === mine.id)) {
+    memos.unshift(mine);
+  }
   renderAll();
   updateSaveSyncTimes();
   if (!currentId) return;
@@ -2754,20 +3249,35 @@ function onExternalStorageChange(e) {
   // 이 창에서 직접 입력 중(창이 활성 + 입력칸 포커스)이면 본문을 덮어쓰지 않음(편집 손실 방지)
   const busyHere = document.hasFocus() && (document.activeElement === editor || document.activeElement === titleInput);
   if (!busyHere) {
-    if (editor.value !== memo.content) editor.value = memo.content;
+    const content = lf(memo.content);
+    if (editor.value !== content) {
+      editor.value = content;
+      // 다른 창에서 고친 내용이 들어왔다 — 그 전 되돌리기 기록으로 돌아가면 그 내용까지 지워진다
+      undoStack = [];
+      redoStack = [];
+      undoGroupOpen = false;
+    }
     if (titleInput.value !== memo.title) titleInput.value = memo.title;
     updateCharCount();
     updateFavButton(memo);
+    updateFolderSelect(memo.folder);
     repaintOverlay(); // 다른 창에서 바뀐 형광펜 반영
   }
   updateMemoDates(memo);
+  updatePopupTitle(memo);
+}
+
+// 새 창(글 쓰기 전용)은 창 제목을 글 제목으로 — 작업 표시줄에서 어느 글인지 보이게
+function updatePopupTitle(memo) {
+  if (!document.body.classList.contains('popup-mode') || !memo) return;
+  document.title = ((memo.title || '').trim() || '새 글') + ' · Project Papers';
 }
 
 // ── Editor ──
 function showEditor(memo) {
   editorToolbar.style.display = 'flex';
   editorContainer.style.display = 'flex';
-  $('#char-count').style.display = 'block';
+  $('#char-count').style.display = 'flex';
   emptyState.style.display = 'none';
   titleInput.value = memo.title;
   editor.value = memo.content;
@@ -2778,7 +3288,10 @@ function showEditor(memo) {
   updateFavButton(memo);
   updateMemoDates(memo);
   updateCharCount();
+  freshCheck = false;   // 받는 중 표시는 이 글을 연 쪽(loadMemoInEditor)에서 필요하면 다시 켠다
   applyViewerMode(!!memo.viewerMode);
+  updateSyncIndicator();
+  updatePopupTitle(memo);
   // 찾기/바꾸기 패널·더보기 닫기
   $('#find-replace-bar').style.display = 'none';
   document.querySelectorAll('.toolbar-extra').forEach((el) => el.classList.remove('toolbar-show'));
@@ -2787,33 +3300,31 @@ function showEditor(memo) {
   $('#toolbar-buttons').classList.remove('expanded');
   // 이전 글에서 쓰던 찾기 표시 초기화 후, 이 글의 형광펜을 오버레이에 그림
   searchKeyword = ''; searchCurrentPos = -1; findMatches = []; findIndex = -1; findAllMode = false;
+  updateReplaceLabel();
   repaintOverlay();
-  // 뒤로가기(모바일 제스처)가 앱을 끄지 않고 글을 먼저 닫도록 기록 한 칸을 쌓아 둔다(글을 바꿔 열 때는 더 쌓지 않음)
-  if (!(history.state && history.state.memoOpen)) history.pushState({ memoOpen: true }, '');
+  // 툴바가 접힌 채(본문을 내려 읽던 중) 새 글을 열어도 제목 칸이 보이게 펼친다 — 안 그러면 안 보이는 제목 칸에 글자가 써진다
+  document.body.classList.remove('toolbar-hidden');
+  lastEditorScrollTop = 0;
+  updateConflictBar(memo);
+  // 다시 열 때 이 글부터(휴대폰이 앱을 내려도) — 새 창은 따로 기억하지 않는다
+  if (!document.body.classList.contains('popup-mode')) store.setItem('open_memo', memo.id);
+  // 뒤로가기(모바일 제스처)가 앱을 끄지 않고 글을 먼저 닫게 한다
+  layersChanged();
 }
 
-// 뒤로가기 → 열린 글을 닫고 빈 화면(There you are)으로. 빈 화면에서 한 번 더 뒤로가기 → 앱 종료
-let skipNextPopstate = false;
-window.addEventListener('popstate', () => {
-  if (skipNextPopstate) { skipNextPopstate = false; return; }
-  if (fm) { closeFolderManager(true); return; }   // 폴더 관리 화면이 떠 있으면 그것만 닫는다
-  $('#sidebar').classList.remove('open');
-  if (editorContainer.style.display === 'none') return;
-  hideEditor();
-  currentId = null;
-  renderMemoList();
-});
-
 function hideEditor() {
-  // 삭제 등 다른 이유로 글이 닫히면 쌓아 둔 기록 칸도 거둬, 다음 뒤로가기가 헛돌지 않게 한다
-  if (history.state && history.state.memoOpen) { skipNextPopstate = true; history.back(); }
   cleanupEmptyMemo();
   editorToolbar.style.display = 'none';
   editorContainer.style.display = 'none';
   $('#char-count').style.display = 'none';
   $('#find-replace-bar').style.display = 'none';
   $('#memo-dates').style.display = 'none';
+  $('#conflict-bar').style.display = 'none';
   emptyState.style.display = 'flex';
+  if (!document.body.classList.contains('popup-mode')) store.removeItem('open_memo');
+  renderRecentList();
+  // 삭제 등 다른 이유로 글이 닫히면 쌓아 둔 기록 칸도 거둬, 다음 뒤로가기가 헛돌지 않게 한다
+  layersChanged();
 }
 
 // 제목·본문이 모두 비어 있고 특정 폴더에도 속하지 않은 메모만 '빈 메모'로 본다.
@@ -2822,10 +3333,11 @@ function isBlankMemo(m) {
   return !m.title.trim() && !m.content.trim() && !m.folder;
 }
 
-function cleanupEmptyMemo() {
+function cleanupEmptyMemo(keepId) {
   // 빈 메모를 모두 정리한다. 한 번도 올린 적 없는 빈 글은 그냥 지우고,
   // 예전에 내용이 있어 올렸던 글을 비운 것이면 휴지통에 넣는다(다른 기기에서도 지워지고, 복원도 된다).
-  const blanks = memos.filter(isBlankMemo);
+  // keepId: 지금 막 열려는 글은 남긴다
+  const blanks = memos.filter((m) => m.id !== keepId && isBlankMemo(m));
   if (!blanks.length) return;
   const base = getSyncBase();
   for (const m of blanks) {
@@ -2837,28 +3349,17 @@ function cleanupEmptyMemo() {
   saveLocalData();
 }
 
-async function loadMemoInEditor(memo) {
-  // 빈 메모 정리를 동기화보다 먼저 실행
-  cleanupEmptyMemo();
-  // 글 전환 시 못 보낸 변경이 있으면 바로 보낸다
+// 글 열기 — 기기에 있는 내용으로 바로 연다(통신을 기다리지 않는다).
+// 예전엔 30초 지났으면 받기가 끝날 때까지 기다렸다 열어, 통신이 멎으면 글이 아예 안 열리고
+// 느리면 기다리다 누른 다른 글이 몇 초 뒤 처음 글로 바뀌었다.
+// 다른 기기에서 바뀌었을 수 있으면 받는 동안(최대 4초)만 고치지 못하게 두고, 받은 내용은 refreshOpenMemo 가 반영한다
+// opts.restorePos: 쓰던 자리(커서·스크롤)로 / opts.query: 목록 검색어 — 본문에서 그 자리를 찾아 보여 준다
+function loadMemoInEditor(memo, opts = {}) {
+  // 빈 메모 정리를 먼저(지금 열 글은 빼고 — 폴더 없는 빈 새 글을 다시 누른 경우)
+  cleanupEmptyMemo(memo.id);
   if (localSaveTimer) saveLocalData();
-  if (syncTimer || isDirty()) syncToDropboxIfDirty().catch(() => {});
-  // 온라인이면 최신 데이터를 먼저 받아온 뒤 열기 (방금 받았으면 건너뜀 — 글마다 900KB를 받지 않게)
-  syncFailedForCurrentMemo = false;
-  if (accessToken && Date.now() - lastPullAt > 30000) {
-    try {
-      setSyncStatus('syncing', '동기화 중...');
-      await queueSync(() => pullAndMerge());
-      if (isDirty()) scheduleSyncToDropbox();
-      setSyncStatus('synced', '동기화 완료');
-      // 동기화 후 최신 memo 객체 다시 조회
-      memo = memos.find((m) => m.id === memo.id);
-      if (!memo) { showToast('해당 메모가 삭제되었습니다'); renderAll(); return; }
-    } catch {
-      setSyncStatus('error', '동기화 실패');
-      syncFailedForCurrentMemo = true;
-    }
-  }
+  memo = memos.find((m) => m.id === memo.id);
+  if (!memo) return;
   offlineCopyId = null;
   currentId = memo.id;
   // 글을 열어도 사이드바 폴더 선택은 그대로 둔다 — '전체'에서 열면 전체 목록, 특정 폴더에서 열면 그 폴더 목록이 유지된다
@@ -2866,13 +3367,55 @@ async function loadMemoInEditor(memo) {
   showEditor(memo);
   renderMemoList();
   renderFolderList();
-  // 새 메모 열 때 툴바·제목 다시 표시
-  document.body.classList.remove('toolbar-hidden');
-  lastEditorScrollTop = 0;
+  if (opts.restorePos) restoreEditorPos(memo.id);
+  if (opts.query) revealQuery(opts.query);
+  if (!accessToken) return;
+  if (needsFreshPull()) {
+    // 받기 + 못 보낸 변경 올리기. 받는 동안은 잠깐 고치지 못하게(옛 내용 위에 쓰면 충돌본이 생긴다)
+    setFreshCheck(true);
+    const done = () => setFreshCheck(false);
+    Promise.race([syncFromDropbox(), dbxSleep(4000)]).then(done, done);
+  } else if (syncTimer || isDirty()) {
+    // 글 전환 시 못 보낸 변경이 있으면 바로 보낸다
+    syncToDropboxIfDirty().catch(onSyncError);
+  }
+}
+
+// 다른 기기 변경을 받아 와야 하나 — 30초 안에 받았거나, Dropbox 변경 알림을 듣고 있으면(바뀌면 바로 받는다) 아니다
+function needsFreshPull() {
+  if (Date.now() - lastPullAt < 30000) return false;
+  return !(typeof watchIsLive === 'function' && watchIsLive());
+}
+
+let freshCheck = false;   // 글을 연 직후 최신 내용을 받는 중 — 그동안은 고치지 못한다
+function setFreshCheck(on) {
+  freshCheck = on;
+  applyEditable();
+  updateSyncIndicator();
+}
+function applyEditable() {
+  const ro = viewerMode || freshCheck;
+  editor.readOnly = ro;
+  titleInput.readOnly = ro;
+}
+
+// 쓰던 자리(커서·스크롤) 기억 — 앱이 내려갔다 다시 열리거나 새 버전으로 다시 열려도 그 자리로
+function saveEditorPos() {
+  if (!currentId || document.body.classList.contains('popup-mode')) return;
+  store.setItem('open_pos', JSON.stringify({ id: currentId, s: editor.selectionStart, e: editor.selectionEnd, top: editor.scrollTop }));
+}
+function restoreEditorPos(id) {
+  let p = null;
+  try { p = JSON.parse(store.getItem('open_pos') || 'null'); } catch { /* 없음 */ }
+  if (!p || p.id !== id) return;
+  const n = editor.value.length;
+  try { editor.setSelectionRange(Math.min(p.s || 0, n), Math.min(p.e || 0, n)); } catch { /* 무시 */ }
+  editor.scrollTop = p.top || 0;
+  $('#editor-highlight').scrollTop = editor.scrollTop;
+  lastEditorScrollTop = editor.scrollTop;
 }
 
 let offlineCopyId = null; // 오프라인 복사본 추적
-let syncFailedForCurrentMemo = false; // 현재 메모 열기 시 동기화 실패 여부
 
 function updateFolderSelect(selectedFolder) {
   // 버튼 title에 현재 폴더 이름 표시
@@ -2919,15 +3462,21 @@ function onFolderSelectItemClick(e) {
   if (!item) return;
   const folderId = item.dataset.folder || null;
   const memo = memos.find((m) => m.id === currentId);
-  if (!memo) return;
-  memo.folder = folderId;
-  // 폴더 지정도 '수정'이므로 updatedAt을 갱신한다.
-  // (갱신하지 않으면 동기화 병합 시 폴더 없던 원격본과 시간이 같아 폴더 지정이 되돌려지고,
-  //  빈 메모로 간주돼 자동 삭제될 수 있다.)
-  memo.updatedAt = Date.now();
   $('#folder-select-dropdown').style.display = 'none';
+  if (!memo || (memo.folder || null) === folderId) return;
+  setMemoFolder(memo, folderId);
   updateFolderSelect(folderId);
   scheduleAutoSave();
+}
+
+// 글의 폴더를 바꾼다. 폴더 지정도 '수정'이므로 updatedAt 을 갱신하고(안 하면 동기화 병합에서 되돌려지고
+// 빈 메모로 여겨져 지워질 수 있다), 폴더를 바꾼 시각(folderAt)을 따로 적는다 — 다른 기기가 그사이 본문을 고쳐
+// 그쪽 판이 남더라도 폴더는 늦게 바꾼 쪽을 따르게(mergeMemos)
+function setMemoFolder(memo, folderId) {
+  const now = Date.now();
+  memo.folder = folderId || null;
+  memo.folderAt = now;
+  memo.updatedAt = now;
 }
 
 function createOfflineCopy(memo) {
@@ -2951,7 +3500,7 @@ function createOfflineCopy(memo) {
   return copy;
 }
 
-function onEditorInput() {
+function onEditorInput(e) {
   let memo = memos.find((m) => m.id === currentId);
   if (!memo) return;
   // 글자가 실제로 안 바뀐 입력 신호(휴대폰 자판이 낱말을 다시 잡을 때 등)에는 '고친 시각'을 찍지 않는다
@@ -2960,7 +3509,7 @@ function onEditorInput() {
   if (!accessToken && !offlineCopyId) {
     memo = createOfflineCopy(memo);
   }
-  scheduleUndoSnapshot(memo);
+  scheduleUndoSnapshot(memo, e);
   // 편집으로 글자 위치가 밀리면 형광펜 위치도 함께 보정
   if (memo.highlights && memo.highlights.length) {
     memo.highlights = adjustHighlights(memo.content, editor.value, memo.highlights);
@@ -2984,6 +3533,7 @@ function onTitleInput() {
   }
   memo.title = titleInput.value;
   memo.updatedAt = Date.now();
+  updatePopupTitle(memo);
   scheduleLocalSave();
   scheduleRenderAndSync();
 }
@@ -3119,12 +3669,13 @@ async function runScheduledSync() {
   // 그사이 다른 길로 방금 올렸으면 간격을 채울 때까지 다시 기다린다
   const wait = lastUploadAt + SYNC_MIN_GAP_MS - Date.now();
   if (wait > 0) { syncTimer = setTimeout(runScheduledSync, wait); return; }
+  if (!accessToken || !isDirty()) { settleSyncStatus('저장 완료'); return; }
   setSyncStatus('syncing', '저장 중...');
   try {
     await syncToDropboxIfDirty();
-    setSyncStatus('synced', '저장 완료');
-  } catch {
-    setSyncStatus('error', '저장 실패');
+    settleSyncStatus('저장 완료');
+  } catch (e) {
+    onSyncError(e);
   }
 }
 
@@ -3133,7 +3684,7 @@ function syncToDropboxIfDirty() {
   if (!accessToken) return Promise.resolve();
   clearTimeout(syncTimer);
   syncTimer = null;
-  return queueSync(() => (isDirty() ? uploadNow() : undefined));
+  return queueSync(() => (isDirty() ? uploadNow() : undefined)).then(() => settleSyncStatus('저장 완료'));
 }
 
 // 앱을 닫거나 다른 화면으로 넘어갈 때: 현재 내용을 즉시 기기에 저장 + 대기 중인 클라우드 전송을 바로 실행
@@ -3144,7 +3695,6 @@ function flushSave() {
   // 그래도 다르다면(정상이면 없는 일) 화면 내용을 잃지 않게 사본으로만 남기고 원본은 건드리지 않는다.
   if (currentId && !reloadingForUpdate) {
     const memo = memos.find((m) => m.id === currentId);
-    const lf = (s) => s.replace(/\r\n?/g, '\n');   // 입력칸은 줄바꿈을 \n 으로 바꿔 돌려준다
     if (memo && (lf(memo.content) !== editor.value || memo.title !== titleInput.value)) {
       memos.unshift(conflictCopy({ ...memo, content: editor.value, title: titleInput.value }));
       saveLocalData();
@@ -3152,10 +3702,11 @@ function flushSave() {
     }
   }
   if (localSaveTimer) saveLocalData();   // 모아 두던 기기 저장을 지금 끝낸다
+  saveEditorPos();                       // 다시 열 때 쓰던 자리로
   // 아직 못 보낸 변경이 있으면 기다리지 않고 지금 바로 보낸다.
   // (예전에는 '대기 중인 전송'이 있을 때만 보내서, 타이핑 1.5초 안에 앱을 벗어나면 아무것도 안 갔다)
   // 새 버전으로 다시 여는 중이면 올리지 않는다 — 새 코드가 열리자마자 이어서 올린다
-  if (accessToken && isDirty() && !reloadingForUpdate) syncToDropboxIfDirty().catch(() => {});
+  if (accessToken && isDirty() && !reloadingForUpdate) syncToDropboxIfDirty().catch(onSyncError);
 }
 
 // ── Viewer Mode ──
@@ -3172,22 +3723,31 @@ function toggleViewer() {
 
 function applyViewerMode(on) {
   viewerMode = on;
-  editor.readOnly = on;
-  titleInput.readOnly = on;
+  applyEditable();
   editor.classList.toggle('viewer', on);
   $('#btn-viewer').classList.toggle('active', on);
 }
 
 // ── Undo / Redo (어절 단위) ──
 let undoGroupOpen = false;     // 현재 타이핑 묶음이 열려 있는지
+let undoGroupKind = 'insert';  // 지금 묶음이 쓰기인지 지우기인지
 let undoIdleTimer = null;
 // 어절 경계로 볼 문자: 공백·줄바꿈·구두점
 const UNDO_WORD_BOUNDARY = /[\s.,!?;:'"()\[\]{}~…·，。！？；：、]/;
 
-function scheduleUndoSnapshot(memo) {
+// e = 입력 신호(InputEvent). 경계는 '방금 친 글자'로 본다 — 예전엔 글 맨 끝 글자를 봐서, 글 끝이 마침표면
+// 글 중간에서 쓸 때 한 글자(한글은 ㅎ·하·한 조합 단계마다)가 한 칸씩 쌓여 되돌리기 50칸이 금방 찼다
+function scheduleUndoSnapshot(memo, e) {
   const before = memo.content;   // 이번 입력이 반영되기 전 내용
   const after = editor.value;    // 반영된 후 내용
   if (before === after) return;
+  const type = (e && e.inputType) || '';
+  const composing = !!(e && (e.isComposing || type === 'insertCompositionText'));   // 한글 조합 중
+  const kind = type.startsWith('delete') ? 'delete' : 'insert';
+  // 붙여넣기·끌어 놓기·자동 고침·프로그램이 넣은 것(구분선·날짜)은 그 하나로 한 덩어리
+  const lump = !type || type === 'insertFromPaste' || type === 'insertFromDrop' || type === 'insertReplacementText';
+  // 쓰다가 지우기로(또는 그 반대로) 넘어가면 새 묶음
+  if (undoGroupOpen && (lump || (kind !== undoGroupKind && !composing))) undoGroupOpen = false;
 
   // 새 어절 묶음의 시작: '입력 전 상태'를 한 번만 저장
   if (!undoGroupOpen) {
@@ -3197,11 +3757,16 @@ function scheduleUndoSnapshot(memo) {
     }
     redoStack = []; // 새 입력 시 되살리기 이력 초기화
     undoGroupOpen = true;
+    undoGroupKind = kind;
   }
 
-  // 어절 경계(공백·구두점)를 입력하면 묶음을 끊어 다음 글자가 새 묶음이 되게 함
-  if (UNDO_WORD_BOUNDARY.test(after.slice(-1))) {
-    undoGroupOpen = false;
+  if (lump) undoGroupOpen = false;
+  else if (!composing && kind === 'insert') {
+    // 어절 경계(공백·구두점·줄바꿈)를 입력하면 묶음을 끊어 다음 글자가 새 묶음이 되게 함
+    const ch = e && typeof e.data === 'string' && e.data ? e.data.slice(-1)
+      : (type === 'insertLineBreak' || type === 'insertParagraph') ? '\n'
+      : after.charAt(editor.selectionStart - 1);
+    if (UNDO_WORD_BOUNDARY.test(ch)) undoGroupOpen = false;
   }
 
   // 잠시(1.2초) 멈추면 묶음을 끊음
@@ -3291,7 +3856,7 @@ function performRedo() {
 
 // ── Char Count ──
 function updateCharCount() {
-  const el = $('#char-count');
+  const el = $('#char-count-n');
   if (!el) return;
   const len = editor.value.length;
   el.textContent = len.toLocaleString() + '자';
@@ -3331,24 +3896,25 @@ function showHelpDialog() {
         <p class="help-h">⌨️ 단축키 (PC)</p>
         <ul>
           <li><kbd>Ctrl</kbd>+<kbd>S</kbd> 저장·동기화</li>
-          <li><kbd>Ctrl</kbd>+<kbd>N</kbd> 새 글</li>
+          <li><kbd>Ctrl</kbd>+<kbd>N</kbd> 새 창에서 새 글</li>
           <li><kbd>Ctrl</kbd>+<kbd>F</kbd> 찾기·바꾸기</li>
           <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> 되돌리기 · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> 되살리기</li>
           <li><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> 구분선 ------ · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> 구분선 ======</li>
           <li><kbd>Alt</kbd>+<kbd>;</kbd> 날짜 입력 · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>;</kbd> 날짜+시간 입력</li>
           <li><kbd>Alt</kbd>+<kbd>H</kbd> 선택 부분 형광펜(하이라이트) 켜기/끄기</li>
+          <li><kbd>Esc</kbd> 찾기 창·대화상자 닫기</li>
         </ul>
         <p class="help-h">🗂️ 폴더·정리</p>
         <ul>
           <li>${ico('folder')} 현재 글을 폴더에 지정 — 빈 글도 폴더를 정하면 사라지지 않습니다</li>
           <li><b>폴더 관리</b> — 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'. 순서·이름·옮기기·휴면(메모 달기)·비밀번호·삭제를 한 화면에서. 체크박스로 여러 개를 한꺼번에. 폴더는 3단계까지</li>
-          <li>${ico('more')} 더보기에서 즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
+          <li>${ico('more')} 더보기에서 형광펜(${ico('marker')})·되살리기(${ico('redo')})·공유(${ico('share')})·즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
           <li>${ico('select')} 선택 모드로 여러 글을 한 번에 이동·삭제</li>
         </ul>
         <p class="help-h">📝 작성·보기</p>
         <ul>
           <li>${ico('template')} 템플릿 저장·불러오기 · ${ico('copy')} 본문만 복사 · ${ico('book')} 읽기 전용 보기</li>
-          <li>형광펜(<kbd>Alt</kbd>+<kbd>H</kbd>)은 앱 안에서만 보이는 표시예요 — 복사·붙여넣기하면 순수 글자만 오갑니다</li>
+          <li>형광펜(<kbd>Alt</kbd>+<kbd>H</kbd>, 휴대폰은 더보기의 ${ico('marker')})은 앱 안에서만 보이는 표시예요 — 복사·붙여넣기하면 순수 글자만 오갑니다</li>
           <li>글 목록에서 <b>더블클릭</b>하면 새 창으로 열립니다</li>
         </ul>
         <p class="help-h">💾 저장·백업·보안</p>
@@ -3358,6 +3924,7 @@ function showHelpDialog() {
           <li>폴더에 비밀번호 설정 가능 (Master로 전체 해제)</li>
         </ul>
       </div>
+      <p class="help-ver">판 ${APP_VERSION}</p>
       <button class="btn btn-primary" id="help-close">닫기</button>
     </div>
   `;
@@ -3378,17 +3945,29 @@ function toggleFindReplace() {
   const visible = bar.style.display !== 'none';
   bar.style.display = visible ? 'none' : 'flex';
   if (!visible) {
-    $('#find-input').value = '';
+    // 본문에서 고른(블록) 낱말이 있으면 그것을 찾기 칸에 넣어 둔다
+    const sel = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+    const fi = $('#find-input');
+    fi.value = sel && sel.length <= 100 && !sel.includes('\n') ? sel : '';
     $('#replace-input').value = '';
     $('#find-count').textContent = '';
     findMatches = [];
     findIndex = -1;
     findAllMode = false;
+    updateReplaceLabel();
     clearHighlight();
-    $('#find-input').focus();
+    fi.focus();
+    fi.select();
+    if (fi.value) findCountOnly();
   } else {
     clearHighlight();
   }
+}
+
+// '모두'를 누른 상태에서 '바꾸기'는 전부 바꾼다 — 단추 이름으로 알린다(예전엔 같은 이름이라 한 건만 바꾸려다 전부 바뀌었다)
+function updateReplaceLabel() {
+  const b = $('#replace-one');
+  if (b) b.textContent = findAllMode ? '모두 바꾸기' : '바꾸기';
 }
 
 function findCountOnly() {
@@ -3492,26 +4071,27 @@ function adjustHighlights(oldText, newText, hls) {
   return normalizeHighlights(out);
 }
 
-// Alt+H: 선택 영역 형광펜 켜기/끄기 (이미 전부 칠해져 있으면 지움)
-function toggleHighlight() {
-  if (viewerMode) return;
-  if (document.activeElement !== editor) return;
+// Alt+H(또는 더보기의 형광펜 단추): 선택 영역 형광펜 켜기/끄기 (이미 전부 칠해져 있으면 지움)
+// fromButton: 단추로 눌렀다 — 본문에 포커스가 없어도 마지막으로 고른 부분에 칠한다(휴대폰엔 Alt 가 없다)
+function toggleHighlight(fromButton) {
+  if (viewerMode) { if (fromButton) showToast('읽기 전용 보기입니다'); return; }
+  const focused = document.activeElement === editor;
+  if (!focused && !fromButton) return;
   const memo = memos.find((m) => m.id === currentId);
   if (!memo) return;
   const start = editor.selectionStart, end = editor.selectionEnd;
   if (start === end) { showToast('형광펜을 칠할 부분을 먼저 선택하세요'); return; }
   const cur = memo.highlights || [];
-  if (isRangeFullyHighlighted(cur, start, end)) {
-    memo.highlights = removeHighlightRange(cur, start, end);
-  } else {
-    memo.highlights = addHighlightRange(cur, start, end);
-  }
+  const off = isRangeFullyHighlighted(cur, start, end);
+  memo.highlights = off ? removeHighlightRange(cur, start, end) : addHighlightRange(cur, start, end);
   memo.updatedAt = Date.now();
   repaintOverlay();
   saveLocalData();
   scheduleRenderAndSync();
-  editor.focus();
-  editor.setSelectionRange(end, end); // 선택(블록) 해제 — 커서만 칠한 부분 끝으로
+  // 선택(블록) 해제 — 커서만 칠한 부분 끝으로. 단추로 칠했고 본문에 포커스가 없었으면 자판을 띄우지 않는다
+  if (focused) editor.focus();
+  editor.setSelectionRange(end, end);
+  if (fromButton) showToast(off ? '형광펜을 지웠습니다' : '형광펜을 칠했습니다');
 }
 
 // 찾기 표시가 켜져 있는지
@@ -3626,6 +4206,7 @@ function clearHighlight() {
 
 function findAndGo() {
   findAllMode = false;
+  updateReplaceLabel();
   // 키워드가 바뀌었으면 재검색, 아니면 다음으로 이동
   const keyword = $('#find-input').value;
   if (findMatches.length === 0 || keyword.toLowerCase() !== (findAndGo._lastKeyword || '').toLowerCase()) {
@@ -3638,15 +4219,30 @@ function findAndGo() {
 function findAllAndGo() {
   findAllMode = true;
   findCountOnly();
-  if (findMatches.length === 0) { clearHighlight(); return; }
+  if (findMatches.length === 0) { findAllMode = false; updateReplaceLabel(); clearHighlight(); return; }
+  updateReplaceLabel();
   updateHighlight($('#find-input').value);
   $('#find-count').textContent = findMatches.length + '건 전체';
   showToast(findMatches.length + '건 찾음');
 }
 
+// 목록 검색어로 글을 열면 본문에서 그 자리를 찾아 보여 준다(찾기 창에 검색어를 넣고 첫 자리로).
+// 자판이 뜨지 않게 찾기 칸에 포커스는 주지 않는다
+function revealQuery(q) {
+  if (!q || !editor.value.toLowerCase().includes(q.toLowerCase())) return;
+  $('#find-replace-bar').style.display = 'flex';
+  $('#find-input').value = q;
+  $('#replace-input').value = '';
+  findAllMode = false;
+  updateReplaceLabel();
+  findCountOnly();
+  if (findMatches.length) findNavigate(1);
+}
+
 function findNavigate(dir) {
   if (findMatches.length === 0) return;
   findAllMode = false;
+  updateReplaceLabel();
   findIndex += dir;
   if (findIndex >= findMatches.length) findIndex = 0;
   if (findIndex < 0) findIndex = findMatches.length - 1;
@@ -3778,7 +4374,7 @@ function applyTemplate(templateId) {
     memo = cur;
     memo.title = tpl.title;
     memo.content = tpl.content;
-    memo.folder = targetFolder;
+    if ((memo.folder || null) !== (targetFolder || null)) setMemoFolder(memo, targetFolder);
     memo.updatedAt = Date.now();
   } else {
     cleanupEmptyMemo();
@@ -3842,7 +4438,8 @@ function replaceAction() {
     const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
     const count = (editor.value.match(regex) || []).length;
     if (count === 0) return;
-    editor.value = editor.value.replace(regex, replacement);
+    // 바꿀 말을 글자 그대로 넣는다 — 문자열로 넘기면 $& · $' · $$ 같은 기호가 다른 글자로 바뀐다
+    editor.value = editor.value.replace(regex, () => replacement);
     const memo = memos.find((m) => m.id === currentId);
     if (memo) {
       if (memo.highlights && memo.highlights.length) memo.highlights = adjustHighlights(oldContent, editor.value, memo.highlights);
@@ -3854,6 +4451,7 @@ function replaceAction() {
     findMatches = [];
     findIndex = -1;
     findAllMode = false;
+    updateReplaceLabel();
     clearHighlight();
     $('#find-count').textContent = count + '건 바꿈';
     showToast(count + '건 바꿨습니다');
@@ -3873,9 +4471,14 @@ function replaceAction() {
     scheduleSyncToDropbox();
     updateCharCount();
     findCountOnly(); // 재검색
+    // 바꾼 자리 바로 다음 결과로 간다(끝까지 갔으면 처음으로). 예전엔 재검색 뒤 맨 마지막 결과로 튀었다
     if (findMatches.length > 0) {
-      if (findIndex >= findMatches.length) findIndex = 0;
-      findNavigate(0);
+      const from = pos + replacement.length;
+      const i = findMatches.findIndex((p) => p >= from);
+      findIndex = (i < 0 ? 0 : i) - 1;
+      findNavigate(1);
+    } else {
+      clearHighlight();
     }
   }
 }
@@ -3992,7 +4595,7 @@ function bulkMoveUnified() {
       const folder = overlay.querySelector('select').value || null;
       for (const id of selectedMemos) {
         const m = memos.find((x) => x.id === id);
-        if (m) { m.folder = folder; m.updatedAt = Date.now(); }
+        if (m && (m.folder || null) !== folder) setMemoFolder(m, folder);
       }
       selectedMemos.clear();
       overlay.remove();
@@ -4013,6 +4616,8 @@ function renderAll() {
   renderFolderList();
   renderMemoList();
   if (fm) renderFolderManager();
+  if (trashView) trashView.renderList();   // 휴지통 창이 열려 있으면 바뀐 목록으로
+  renderRecentList();
 }
 
 function toggleFolderDropdown() {
@@ -4028,6 +4633,7 @@ function toggleFolderListCollapse() {
 
 function toggleFavFilter() {
   favFilterActive = !favFilterActive;
+  saveUiPrefs();
   const btn = $('#btn-fav-filter');
   btn.classList.toggle('active', favFilterActive); // 켜지면 CSS 가 별 속을 채운다
   renderMemoList();
@@ -4238,6 +4844,7 @@ function renderFolderList() {
         if (isFolderLocked(val)) {
           showPasswordPrompt(val, () => {
             currentFolder = val;
+            saveUiPrefs();
             renderAll();
             if (!selectMode) $('#folder-dropdown').style.display = 'none';
           });
@@ -4245,6 +4852,7 @@ function renderFolderList() {
         }
         currentFolder = val;
       }
+      saveUiPrefs();
       renderAll();
       if (!selectMode) $('#folder-dropdown').style.display = 'none';
     });
@@ -4272,21 +4880,25 @@ function renderMemoList() {
     filtered = filtered.filter((m) => m.favorite);
   }
 
-  if (query) {
-    filtered = filtered.filter(
-      (m) =>
-        (m.title || '').toLowerCase().includes(query) ||
-        (m.content || '').toLowerCase().includes(query)
-    );
-  }
+  const hit = (m) => (m.title || '').toLowerCase().includes(query) || (m.content || '').toLowerCase().includes(query);
+  if (query) filtered = filtered.filter(hit);
 
   // 정렬
-  if (memoSortKey === 'title') {
-    filtered.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'ko'));
-  } else if (memoSortKey === 'createdAt') {
-    filtered.sort((a, b) => b.createdAt - a.createdAt);
-  } else {
-    filtered.sort((a, b) => b.updatedAt - a.updatedAt);
+  const sortList = (list) => {
+    if (memoSortKey === 'title') list.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'ko'));
+    else if (memoSortKey === 'createdAt') list.sort((a, b) => b.createdAt - a.createdAt);
+    else list.sort((a, b) => b.updatedAt - a.updatedAt);
+    return list;
+  };
+  sortList(filtered);
+
+  // '전체'에서 찾을 때는 휴면 폴더 글도 따로 모아 아래에 보여 준다(잠긴 폴더 글은 보이지 않는다).
+  // 예전엔 휴면 폴더 글이 검색에 아예 안 나와, 있는 글을 못 찾았다
+  let dormantHits = [];
+  if (query && currentFolder === null) {
+    const dormantIds = getDormantFolderIds();
+    dormantHits = sortList(memos.filter((m) => dormantIds.has(m.folder) && !lockedIds.includes(m.folder) &&
+      !isBlankMemo(m) && hit(m) && (!favFilterActive || m.favorite)));
   }
 
   // 폴더 보기일 때(전체 보기가 아닐 때) 즐겨찾기 상단 고정
@@ -4298,25 +4910,30 @@ function renderMemoList() {
     filtered = [...favs, ...normals];
   }
 
-  memoList.innerHTML = filtered
-    .map((m) => {
-      const title = m.title || formatCreatedAt(m.createdAt) + ' 새 글';
-      const date = formatDate(m.updatedAt);
-      const active = m.id === currentId ? 'active' : '';
-      const favIcon = m.favorite ? '<span class="memo-item-fav">★</span>' : '';
-      const checkbox = selectMode ? '<input type="checkbox" class="memo-item-checkbox" data-check="' + m.id + '"' + (selectedMemos.has(m.id) ? ' checked' : '') + '>' : '';
-      return `
-        <div class="memo-item ${active}" data-id="${m.id}">
+  const itemHtml = (m, extraCls = '') => {
+    const title = m.title || formatCreatedAt(m.createdAt) + ' 새 글';
+    const date = formatDate(m.updatedAt);
+    const active = m.id === currentId ? 'active' : '';
+    const favIcon = m.favorite ? '<span class="memo-item-fav">★</span>' : '';
+    const checkbox = selectMode ? '<input type="checkbox" class="memo-item-checkbox" data-check="' + m.id + '"' + (selectedMemos.has(m.id) ? ' checked' : '') + '>' : '';
+    // 검색어가 본문에 있으면 찾은 자리 둘레를 한 줄로
+    const snip = query ? searchSnippet(m, query) : '';
+    return `
+        <div class="memo-item ${active}${extraCls}" data-id="${m.id}">
           ${checkbox}
           ${favIcon}
           <div class="memo-item-info">
             <div class="memo-item-title">${escapeHtml(title)}</div>
+            ${snip ? `<div class="memo-item-snippet">${snip}</div>` : ''}
           </div>
           <div class="memo-item-date">${date}</div>
         </div>
       `;
-    })
-    .join('');
+  };
+  memoList.innerHTML = filtered.map((m) => itemHtml(m)).join('') +
+    (dormantHits.length ? `<div class="memo-list-divider">${ico('moon')}<span>휴면 폴더에서 찾은 글 ${dormantHits.length}</span></div>` +
+      dormantHits.map((m) => itemHtml(m, ' dormant-hit')).join('') : '') +
+    (query && !filtered.length && !dormantHits.length ? '<div class="memo-list-empty">찾는 글이 없습니다</div>' : '');
 
   // 선택 모드: 체크박스 이벤트
   const memoItems = Array.from(memoList.querySelectorAll('.memo-item'));
@@ -4397,13 +5014,17 @@ function renderMemoList() {
         lastCheckedMemoIndex = idx;
         return;
       }
-      if (clickTimer) return;
-      clickTimer = setTimeout(() => {
-        clickTimer = null;
+      const open = () => {
         const memo = memos.find((m) => m.id === el.dataset.id);
-        if (memo) loadMemoInEditor(memo);
+        // 검색해서 연 글이면 본문에서 찾은 자리를 보여 준다
+        if (memo) loadMemoInEditor(memo, { query: searchBox.value.trim() });
         $('#sidebar').classList.remove('open');
-      }, 250);
+      };
+      // 손가락으로 누르면 바로 연다 — 0.25초 기다림은 마우스 더블클릭(새 창)과 가르려는 것이라 휴대폰엔 필요 없다
+      const touch = e.pointerType ? e.pointerType !== 'mouse' : matchMedia('(pointer: coarse)').matches;
+      if (touch) { open(); return; }
+      if (clickTimer) return;
+      clickTimer = setTimeout(() => { clickTimer = null; open(); }, 250);
     });
     el.addEventListener('dblclick', () => {
       if (selectMode) return;
@@ -4413,6 +5034,32 @@ function renderMemoList() {
       window.open(location.pathname + '?memo=' + id + MODE_QUERY, '_blank', 'width=400,height=700');
     });
   });
+}
+
+// 검색어가 본문에 있으면 그 둘레 한 줄(찾은 말은 굵게) — 목록에서 어느 대목이 걸렸는지 보이게
+function searchSnippet(m, q) {
+  const c = m.content || '';
+  const i = c.toLowerCase().indexOf(q);
+  if (i < 0) return '';
+  const from = Math.max(0, i - 16);
+  const to = Math.min(c.length, i + q.length + 40);
+  const clean = (x) => escapeHtml(x.replace(/\s+/g, ' '));
+  return (from > 0 ? '…' : '') + clean(c.slice(from, i)) + '<b>' + clean(c.slice(i, i + q.length)) + '</b>' +
+    clean(c.slice(i + q.length, to)) + (to < c.length ? '…' : '');
+}
+
+// 빈 화면(There you are) 아래 최근 글 — 휴대폰에서 앱을 열면 목록을 열지 않고도 바로 고를 수 있게(넓은 화면에선 숨김)
+function renderRecentList() {
+  const box = document.getElementById('recent-list');
+  if (!box) return;
+  if (emptyState.style.display === 'none' || !memos.length) { box.innerHTML = ''; return; }
+  const hidden = new Set([...getLockedFolderIds(), ...getDormantFolderIds()]);
+  const recent = memos.filter((m) => !isBlankMemo(m) && !hidden.has(m.folder))
+    .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 8);
+  if (!recent.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="recent-head">최근 글</div>' + recent.map((m) =>
+    `<button class="recent-item" type="button" data-id="${m.id}"><span class="recent-title">${escapeHtml(m.title || formatCreatedAt(m.createdAt) + ' 새 글')}</span><span class="recent-date">${formatDate(m.updatedAt)}</span></button>`).join('') +
+    '<button class="recent-all" type="button">모든 글 보기</button>';
 }
 
 // ── UI Helpers ──
@@ -4438,6 +5085,7 @@ function showApp() {
 function setSyncStatus(cls, text) {
   syncStatus.className = cls;
   syncStatus.textContent = text;
+  updateSyncIndicator();
 }
 
 let toastTimer = null;
@@ -4464,6 +5112,8 @@ function formatDate(ts) {
   if (d.toDateString() === now.toDateString()) {
     return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
   }
+  // 올해가 아닌 글은 연도도 붙인다(예전엔 '3월 5일'만 보여 작년 글과 헷갈렸다)
+  if (d.getFullYear() !== now.getFullYear()) return `${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}.`;
   return d.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' });
 }
 
@@ -4477,10 +5127,11 @@ function formatCreatedAt(ts) {
   return `${Y}-${M}-${D} ${h}:${m}`;
 }
 
+// 화면에 넣을 글자 — 속성(value="…" 등)에 넣어도 깨지지 않게 따옴표까지 바꾼다
+// (예전엔 따옴표를 그대로 둬, '특집 "A" 기획' 폴더 이름이 이름 바꾸기 칸에 '특집'으로 잘려 나왔다)
 function escapeHtml(s) {
-  const div = document.createElement('div');
-  div.textContent = s;
-  return div.innerHTML;
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // ── Cloudflare 잠금(Access) 로그인 만료 ──
@@ -4511,6 +5162,7 @@ if ('serviceWorker' in navigator) {
     if (!hadController || reloadingForUpdate) return;   // 처음 설치될 때는 다시 열 필요 없음
     reloadingForUpdate = true;
     if (localSaveTimer) saveLocalData();
+    saveEditorPos();   // 다시 열면 쓰던 자리(커서·스크롤)로
     if (currentId) sessionStorage.setItem('reopen_memo', currentId);
     location.reload();
   });

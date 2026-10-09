@@ -79,18 +79,17 @@ function splitWanted() {
 const isPermDeleted = (id) => deletedIds.some((d) => (d.id || d) === id);
 
 // ── Dropbox 호출 ──
-// 401 → 토큰 갱신 한 번, 429 → 잠깐 쉬고 다시. 409(충돌·없음)는 부른 쪽에서 본다
+// 401 → 토큰 갱신 한 번, 429 → 잠깐 쉬고 다시. 409(충돌·없음)는 부른 쪽에서 본다.
+// 응답이 끝내 안 오면 제한 시간(init.timeout, 기본 30초) 뒤 실패로 본다 — 동기화 줄이 막히지 않게
 async function dbxFetch(url, init, attempt = 0, retried = false) {
-  const res = await fetch(url, {
+  const res = await timedFetch(url, {
     method: 'POST',
     body: init.body,
     headers: { 'Authorization': 'Bearer ' + accessToken, ...init.headers },
-  });
+  }, init.timeout || DBX_TIMEOUT);
   if (res.status === 401) {
     if (!retried && await refreshAccessToken()) return dbxFetch(url, init, attempt, true);
-    showToast('Dropbox 인증 만료. 다시 로그인해주세요.');
-    logout();
-    throw new Error('auth expired');
+    authExpired();
   }
   if (res.status === 429 && attempt < DBX_MAX_RETRY) {
     await dbxSleep(dbxRetryDelay(res, attempt));
@@ -112,13 +111,15 @@ async function dbxRpc(endpoint, arg) {
   return { status: res.status, ok: res.ok, data };
 }
 
-// 올리기. mode: 'add'(새로) | { '.tag': 'update', update: rev }(그 버전 위에만). 충돌이면 { conflict: true }
+// 올리기. mode: 'add'(새로) | { '.tag': 'update', update: rev }(그 버전 위에만).
+// 충돌이면 { conflict: true }, Dropbox 공간이 가득 찼으면 { space: true }
 async function dbxPut(path, body, mode) {
   const res = await dbxFetch('https://content.dropboxapi.com/2/files/upload', {
     headers: { 'Content-Type': 'application/octet-stream', 'Dropbox-API-Arg': dbxArg({ path, mode, autorename: false, mute: true }) },
     body,
+    timeout: body.length > 200000 ? DBX_TIMEOUT_BIG : DBX_TIMEOUT,
   });
-  if (res.status === 409) return { conflict: true };
+  if (res.status === 409) return (await dbxSpaceFull(res)) ? { space: true } : { conflict: true };
   if (!res.ok) throw new Error('upload failed: ' + res.status);
   const meta = await res.json();
   return { rev: meta.rev };
@@ -205,6 +206,7 @@ async function splitFetchFiles(keys, full) {
     try {
       const res = await dbxFetch('https://content.dropboxapi.com/2/files/download_zip', {
         headers: { 'Dropbox-API-Arg': dbxArg({ path: SPLIT_DIR }) },
+        timeout: DBX_TIMEOUT_BIG,
       });
       if (res.ok) {
         for (const [name, text] of await unzipText(await res.arrayBuffer())) {
@@ -294,12 +296,20 @@ async function splitApply(L) {
   const remoteNotes = need.filter((k) => k.startsWith('n:')).map(take).filter((m) => m && m.id);
   if (remoteNotes.length) memos = mergeMemos(memos, remoteNotes);
   // 4) 원격에서 사라진 파일
+  // 안전장치: 휴지통 기록도 영구 삭제 기록도 없이 글이 한꺼번에 많이 사라졌으면(Dropbox 에서 sync 폴더를 통째로 지운
+  // 사고 등) 이 기기 글을 지우지 않는다 — 그대로 두고 다시 올려 Dropbox 를 되살린다. 휴지통 항목도 그대로 둔다.
+  // (예전엔 받기 쪽엔 이 장치가 없어, 모든 기기에서 글 전부가 경고 없이 휴지통으로 가고 옛 휴지통 항목은 사라졌다)
+  const vanished = [...latest].filter(([k, rev]) => !rev && st.base[k] && k.startsWith('n:')).map(([k]) => k.slice(2))
+    .filter((id) => memos.some((x) => x.id === id) && !trash.some((t) => t.type === 'memo' && t.data && t.data.id === id) && !isPermDeleted(id));
+  const knownNotes = Object.keys(st.revs).filter((k) => k.startsWith('n:')).length;
+  const massLoss = vanished.length > 10 && vanished.length > knownNotes / 2;
   for (const [k, rev] of latest) {
     if (rev) continue;
     const had = st.base[k];
     delete st.revs[k];
     delete st.base[k];
     if (!had) continue;   // 원격에 있다고 알던 적 없는 파일
+    if (massLoss) continue;   // 지우지 않고 남긴다 — 기준점을 지웠으니 다음 올리기에서 새로 올라간다
     if (k.startsWith('n:')) {
       const id = k.slice(2);
       const m = memos.find((x) => x.id === id);
@@ -315,16 +325,21 @@ async function splitApply(L) {
       if (i >= 0 && textHash(canon(trash[i])) === had) trash.splice(i, 1);   // 다른 기기에서 복원했거나 영구 삭제했다
     }
   }
+  if (massLoss) {
+    showToast(`Dropbox 에서 글 ${vanished.length}편이 한꺼번에 사라져, 이 기기의 글을 지우지 않고 다시 올립니다`, { duration: 10000 });
+  }
   reconcileTrash();
   saveLocalData(false);
   store.setItem('split_cursor', L.cursor);
   saveSplitState(st);
   splitFinish(st);
   refreshOpenMemo();
+  notifyConflicts();
 }
 
-// 동기화 끝 정리 — 원격과 같아진 글·폴더는 다음 합치기의 기준점으로 삼고, 남은 변경이 있는지 적는다
-function splitFinish(st, seq) {
+// 동기화 끝 정리 — 원격과 같아진 글·폴더는 다음 합치기의 기준점으로 삼고, 남은 변경이 있는지 적는다.
+// rejected: 이번 올리기에서 거절된 것이 남았다 — '최근 동기화' 시각을 새로 찍지 않는다(못 보냈는데 된 것처럼 보이지 않게)
+function splitFinish(st, seq, rejected) {
   const want = splitWanted();
   let clean = seq === undefined || (seq === changeSeq && !localSaveTimer);
   for (const [k, body] of want) if (st.base[k] !== textHash(body)) { clean = false; break; }
@@ -341,14 +356,15 @@ function splitFinish(st, seq) {
   }
   if (st.base.meta === textHash(want.get('meta'))) for (const f of folders) sb['f:' + f.id] = f.updatedAt || 0;
   store.setItem('sync_base', JSON.stringify(sb));
-  store.setItem('last_synced_at', String(Date.now()));
+  if (!rejected) store.setItem('last_synced_at', String(Date.now()));
   store.setItem('pending_sync', clean ? '0' : '1');
   if (clean) pendingSince = 0;
   updateSaveSyncTimes();
 }
 
 // ── 올리기 ──
-// 달라진 파일만 올리고, 이 기기에서 없어진 것은 지운다. 충돌(다른 기기가 먼저 고침)이 있으면 받아 합친 뒤 한 번 더
+// 달라진 파일만 올리고, 이 기기에서 없어진 것은 지운다. 충돌(다른 기기가 먼저 고침)이 있으면 받아 합친 뒤 한 번 더.
+// 그래도 거절된 게 남으면(계속 겹침·Dropbox 공간 부족) syncProblem 에 적어 화면이 '못 보냄'을 보이고 잠시 뒤 다시 한다
 async function splitPush(force, retried) {
   if (!accessToken || outdatedClient) return;
   if (!force && isLocalEmpty()) { console.warn('빈 상태라 올리지 않음'); return; }
@@ -366,12 +382,14 @@ async function splitPush(force, retried) {
   const known = Object.keys(st.revs).filter((k) => k.startsWith('n:')).length;
   const delNotes = dels.filter((k) => k.startsWith('n:')).length;
   if (!force && delNotes > 10 && delNotes > known / 2) {
+    syncProblem = 'guard';
     setSyncStatus('error', '동기화 멈춤');
     showToast('글이 한꺼번에 많이 사라진 상태라 Dropbox 에서 지우지 않았습니다');
     return;
   }
   if (!ups.length && !dels.length) {
     splitFinish(st, seq);
+    syncProblem = null;
     if (!retried && store.getItem('split_frozen') !== '1') await freezeLegacy();
     return;
   }
@@ -381,34 +399,39 @@ async function splitPush(force, retried) {
   const total = ups.length + dels.length;
   let done = 0;
   let conflict = false;
+  let space = false;
+  const rejected = [];
   for (const k of ups) {
     if (total > 10) setSyncStatus('syncing', `올리는 중 ${++done}/${total}`);
     const body = want.get(k);
     const r = await dbxPut(splitPath(k), body, st.revs[k] ? { '.tag': 'update', update: st.revs[k] } : 'add');
-    if (r.conflict) { conflict = true; continue; }
+    if (r.space) { space = true; rejected.push(k); break; }   // 공간이 없으면 나머지도 안 된다
+    if (r.conflict) { conflict = true; rejected.push(k); continue; }
     st.revs[k] = r.rev;
     st.base[k] = textHash(body);
     saveSplitState(st);   // 중간에 끊겨도 올린 만큼은 기억한다
   }
-  for (const k of dels) {
+  for (const k of space ? [] : dels) {
     if (total > 10) setSyncStatus('syncing', `올리는 중 ${++done}/${total}`);
     let r = await dbxRpc('files/delete_v2', { path: splitPath(k), parent_rev: st.revs[k] });
     if (r.status === 400) r = await dbxRpc('files/delete_v2', { path: splitPath(k) });   // parent_rev 를 못 받는 경우
     const gone = r.ok || (r.status === 409 && /not_found/.test(JSON.stringify(r.data || '')));
     if (gone) { delete st.revs[k]; delete st.base[k]; saveSplitState(st); }
-    else if (r.status === 409) conflict = true;
+    else if (r.status === 409) { conflict = true; rejected.push(k); }
     else throw new Error('delete failed: ' + r.status);
   }
   lastUploadAt = Date.now();
-  if (conflict && !retried) {
+  if (conflict && !space && !retried) {
     await splitPull();
     renderAll();
     return splitPush(force, true);
   }
-  splitFinish(st, seq);
+  splitFinish(st, seq, rejected.length > 0);
+  syncProblem = space ? 'space' : rejected.length ? 'rejected' : null;
+  if (space) warnSpace();
   if (isDirty()) pendingSince = lastUploadAt;
   // 옮기다 끊겨 옛 파일을 아직 못 얼렸으면 지금 마저(옛 앱이 계속 옛 파일에 쓰지 않게)
-  if (!retried && store.getItem('split_frozen') !== '1') await freezeLegacy();
+  if (!retried && !rejected.length && store.getItem('split_frozen') !== '1') await freezeLegacy();
 }
 
 // ── 처음 맞추기·옮겨 오기 ──
@@ -534,4 +557,76 @@ async function splitBackup(name) {
   if (!mk.ok && mk.status !== 409) throw new Error('backup folder failed: ' + mk.status);
   const r = await dbxRpc('files/copy_v2', { from_path: SPLIT_DIR, to_path: BACKUP_DIR + '/' + name, autorename: false });
   if (!r.ok) throw new Error('backup copy failed: ' + r.status + ' ' + JSON.stringify(r.data || '').slice(0, 120));
+}
+
+// ── 다른 기기 변경 바로 알기 (Dropbox 변경 알림) ──
+// 화면이 보이는 동안 Dropbox 에 '이 커서 뒤로 바뀌면 알려 달라'고 걸어 둔다(최대 2분 기다리는 가벼운 요청, 로그인 없이 커서만).
+// 바뀌었다는 답이 오면 바로 받는다 — 휴대폰에서 고친 글이 PC 창을 띄워 둔 채로도 몇 초 안에 들어온다
+// (예전엔 창이 계속 떠 있으면 다른 글을 열거나 창을 내렸다 올릴 때까지 받지 않아, 옛 내용 위에 쓰다 충돌본이 생겼다).
+// 화면이 가려지면 끊고, 돌아오면 다시 건다. 시험(ns) 화면은 &watch=1 일 때만
+const WATCH_ON = TEST_NS == null || PAGE_PARAMS.get('watch') === '1';
+const WATCH_TIMEOUT = 120;   // 초 — Dropbox 가 최대 90초를 더 얹어 답할 수 있다
+let watchCtl = null;
+let watchSince = 0;          // 지금 알림 요청을 건 시각 — 0 이면 쉬는 중(실패 뒤 기다림 등)
+
+// 변경 알림을 듣고 있나 — 듣고 있으면 글을 열 때 따로 받지 않아도 된다
+function watchIsLive() {
+  return !!watchCtl && watchSince > 0 && Date.now() - watchSince < (WATCH_TIMEOUT + 120) * 1000;
+}
+
+function startWatch() {
+  if (!WATCH_ON || !SPLIT_SYNC || !accessToken || watchCtl || document.visibilityState !== 'visible') return;
+  const ctl = new AbortController();
+  watchCtl = ctl;
+  watchLoop(ctl).finally(() => { if (watchCtl === ctl) { watchCtl = null; watchSince = 0; } });
+}
+
+function stopWatch() {
+  if (!watchCtl) return;
+  watchCtl.abort();
+  watchCtl = null;
+  watchSince = 0;
+}
+
+// 기다리기 — 끊으면(abort) 바로 끝난다
+function waitOrStop(ms, signal) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
+
+async function watchLoop(ctl) {
+  let failures = 0;
+  while (watchCtl === ctl && !ctl.signal.aborted && accessToken && document.visibilityState === 'visible') {
+    const cursor = store.getItem('split_cursor');
+    if (!cursor || store.getItem('split_ready') !== '1') { watchSince = 0; await waitOrStop(30000, ctl.signal); continue; }
+    try {
+      watchSince = Date.now();
+      const res = await fetch('https://notify.dropboxapi.com/2/files/list_folder/longpoll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cursor, timeout: WATCH_TIMEOUT }),
+        signal: ctl.signal,
+      });
+      if (res.status === 400 || res.status === 409) {
+        // 커서가 낡았다 — 받기를 한 번 해서 새 커서를 만든 뒤 다시 건다
+        watchSince = 0;
+        await syncFromDropbox();
+        await waitOrStop(5000, ctl.signal);
+        continue;
+      }
+      if (!res.ok) throw new Error('longpoll ' + res.status);
+      const data = await res.json();
+      failures = 0;
+      if (data.changes && !ctl.signal.aborted) await syncFromDropbox();
+      if (data.backoff) { watchSince = 0; await waitOrStop(data.backoff * 1000, ctl.signal); }
+    } catch (e) {
+      if (ctl.signal.aborted) break;
+      // 통신이 끊겼다 — 쉬었다가 다시(15초 → 30초 → … 최대 5분)
+      watchSince = 0;
+      failures++;
+      await waitOrStop(Math.min(15000 * 2 ** (failures - 1), 300000), ctl.signal);
+    }
+  }
 }

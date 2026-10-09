@@ -41,6 +41,8 @@
   <symbol id="i-grip" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12 M18 6 6 18"/></symbol>
   <symbol id="i-tag" viewBox="0 0 24 24"><path d="M4 4h7.2l8.8 8.8-7.2 7.2L4 11.2z"/><circle cx="8.5" cy="8.5" r="1.5"/></symbol>
+  <symbol id="i-marker" viewBox="0 0 24 24"><path d="M14.5 3.5l6 6-8.5 8.5-6-6z M6 12l-2.2 5.2 3 3L12 18 M3.5 21.5h9"/></symbol>
+  <symbol id="i-note" viewBox="0 0 24 24"><path d="M6.5 3h11Q19 3 19 4.5v15q0 1.5-1.5 1.5h-11Q5 21 5 19.5v-15Q5 3 6.5 3z M8.5 8h7 M8.5 11.5h7 M8.5 15h4.5"/></symbol>
 </svg>
 
 <div id="app" style="display:none">
@@ -119,10 +121,11 @@
         <div id="toolbar-right">
           <button class="btn-icon" id="btn-copy" title="복사"><svg class="ico"><use href="#i-copy"/></svg></button>
           <button class="btn-icon" id="btn-undo" title="되돌리기"><svg class="ico"><use href="#i-undo"/></svg></button>
-          <button class="btn-icon" id="btn-redo" title="되살리기" style="display:none"><svg class="ico"><use href="#i-redo"/></svg></button>
           <button class="btn-icon" id="btn-viewer" title="보기 모드"><svg class="ico"><use href="#i-book"/></svg></button>
           <button class="btn-icon" id="btn-find" title="찾기/바꾸기"><svg class="ico"><use href="#i-search"/></svg></button>
-          <button class="btn-icon" id="btn-share" title="공유" style="display:none"><svg class="ico"><use href="#i-share"/></svg></button>
+          <button class="btn-icon toolbar-extra" id="btn-highlight" title="형광펜 (고른 부분, Alt+H)"><svg class="ico"><use href="#i-marker"/></svg></button>
+          <button class="btn-icon toolbar-extra" id="btn-redo" title="되살리기"><svg class="ico"><use href="#i-redo"/></svg></button>
+          <button class="btn-icon toolbar-extra" id="btn-share" title="공유"><svg class="ico"><use href="#i-share"/></svg></button>
           <button class="btn-icon toolbar-extra" id="btn-fav" title="즐겨찾기"><svg class="ico"><use href="#i-star"/></svg></button>
           <button class="btn-icon toolbar-extra" id="btn-delete" title="삭제"><svg class="ico"><use href="#i-trash"/></svg></button>
         </div>
@@ -132,6 +135,10 @@
       <div id="memo-dates" style="display:none">
         <span id="memo-dates-text"></span>
         <button id="btn-help" type="button" title="사용 도움말·팁">도움말</button>
+      </div>
+      <div id="conflict-bar" style="display:none">
+        <span>충돌본</span>
+        <button id="btn-conflict-compare" type="button">원본과 비교</button>
       </div>
     </div>
     <button id="toolbar-reveal" type="button" title="메뉴 펼치기">▼</button>
@@ -153,10 +160,13 @@
       <div id="editor-highlight"></div>
       <textarea id="editor" placeholder="Hello, there?"></textarea>
     </div>
-    <div id="char-count" style="display:none"></div>
+    <div id="char-count" style="display:none"><button id="sync-dot" type="button"></button><span id="char-count-n"></span></div>
     <div id="empty-state">
-      <div class="icon">📝</div>
-      <div>There you are!</div>
+      <div class="empty-hero">
+        <div class="icon">📝</div>
+        <div>There you are!</div>
+      </div>
+      <div id="recent-list"></div>
     </div>
   </main>
 </div>
