@@ -1235,6 +1235,7 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
 /* Empty state */
 #empty-state {
   flex: 1;
+  min-height: 0;   /* 최근 글이 화면보다 길면 이 칸 안에서 굴려 내려 본다(없으면 잘린 채 굴러가지 않았다) */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1243,9 +1244,10 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   font-size: 1.1rem;
   gap: 12px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 /* 이 부분을 누르면 새 글 */
-.empty-hero { display: flex; flex-direction: column; align-items: center; gap: 12px; cursor: pointer; }
+.empty-hero { display: flex; flex-direction: column; align-items: center; gap: 12px; cursor: pointer; flex-shrink: 0; }
 #empty-state .icon { font-size: 3rem; opacity: 0.3; }
 /* 빈 화면 아래 최근 글 — 휴대폰에서만(넓은 화면은 왼쪽 목록이 늘 보인다) */
 #recent-list { display: none; }
@@ -1254,21 +1256,22 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   #recent-list:not(:empty) {
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;   /* 줄어들지 않고 길이대로 — 넘치는 만큼 위 칸이 굴러간다 */
     width: 100%;
     max-width: 480px;
-    margin-top: 18px;
+    margin-top: 14px;
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
   }
 }
-.recent-head { padding: 10px 14px 6px; font-size: 0.75rem; font-weight: 600; color: var(--text2); }
+.recent-head { padding: 7px 12px 4px; font-size: 0.72rem; font-weight: 600; color: var(--text2); }
 .recent-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 11px 14px;
+  gap: 8px;
+  padding: 6px 12px;
   background: none;
   border: none;
   border-top: 1px solid var(--bg2);
@@ -1278,16 +1281,16 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   cursor: pointer;
 }
 .recent-item:hover { background: var(--bg); }
-.recent-title { flex: 1; min-width: 0; font-size: 0.95rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent-date { flex-shrink: 0; font-size: 0.75rem; color: var(--text2); }
+.recent-title { flex: 1; min-width: 0; font-size: 0.86rem; font-weight: 600; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-date { flex-shrink: 0; font-size: 0.7rem; color: var(--text2); }
 .recent-all {
-  padding: 11px 14px;
+  padding: 8px 12px;
   background: var(--bg);
   border: none;
   border-top: 1px solid var(--border);
   color: var(--accent);
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   cursor: pointer;
 }
 
