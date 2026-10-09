@@ -13,7 +13,8 @@ const DBX_ROOT = PILOT ? '/projectpapers-pilot' : '/projectpapers';
 const OLD_DBX_ROOT = PILOT ? '/project-papers-pilot' : '/project-papers';
 // 글 단위 동기화(sync-split.js) — 2026-10-04 전환. 옛 한 파일 방식은 옮겨 올 때와 시험에서만 쓴다
 const SPLIT_SYNC = TEST_NS != null ? PAGE_PARAMS.get('split') === '1' : true;
-const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh']);   // 로그인은 칸과 상관없이 하나
+// 로그인과 화면 설정(어두운 화면·글자 크기)은 칸과 상관없이 하나 — 화면 설정은 index.html 머리에서 그리기 전에도 읽는다
+const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh', 'memo_theme', 'memo_font']);
 // Dropbox 위치에 딸린 동기화 기록(받은 커서·파일 버전·기준점·못 보낸 변경)은 위치 이름을 붙여 따로 둔다.
 // 옛 주소의 앱도 같은 기기 저장소(door9.github.io)를 쓰므로, 옛 앱이 옛 폴더 기록을 써도 섞이지 않게.
 // 새 위치에서는 기록이 비어 있어 처음 맞추기(받아서 합치고 다른 것만 올리기)부터 한다. 글·폴더 자체는 함께 쓴다
@@ -44,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '158';
+const APP_VERSION = '159';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -166,6 +167,9 @@ async function init() {
   } catch (e) {}
 
   requestPersistentStorage(); // 저장소 유지 요청 (로그인이 오래 유지되도록)
+  // 어두운 화면·글자 크기(index.html 머리에서 이미 입혔지만 같은 규칙으로 한 번 더)
+  applyTheme();
+  applyFont();
 
   await handleOAuthCallback();
   loadLocalData();
@@ -292,6 +296,9 @@ async function init() {
   $('#btn-highlight').addEventListener('pointerdown', (e) => e.preventDefault());
   $('#btn-highlight').addEventListener('click', () => toggleHighlight(true));
   $('#sync-dot').addEventListener('click', () => { if (accessToken && (syncProblem || isDirty())) syncFromDropbox(); });
+  // 화면 설정(어두운 화면·글자 크기) — 글 화면의 더보기, 목록 아래 '화면'
+  $('#btn-display').addEventListener('click', showDisplaySettings);
+  $('#btn-display-side').addEventListener('click', showDisplaySettings);
   $('#btn-conflict-compare').addEventListener('click', () => showConflictCompare(currentId));
   $('#btn-toolbar-more').addEventListener('click', toggleToolbarMore);
   $('#btn-template').addEventListener('click', toggleTemplateDropdown);
@@ -484,6 +491,108 @@ function keyLetter(e) {
   const key = (e.key || '').toLowerCase();
   if (/^[a-z]$/.test(key) || !/^Key[A-Z]$/.test(e.code || '')) return key;
   return e.code.slice(3).toLowerCase();
+}
+
+// ── 화면 설정: 어두운 화면 · 글자 크기 ──
+// 기기마다 따로 둔다(휴대폰과 PC 는 화면도 쓰는 곳도 달라서). 글자 크기는 글마다가 아니라 모든 글 본문·제목에 함께.
+// index.html 머리의 작은 스크립트가 같은 규칙으로 그리기 전에 먼저 입힌다(밝은 화면이 잠깐 번쩍이지 않게)
+const THEME_KEY = 'memo_theme';   // 'light' | 'dark' | 'system'(기기 설정 따름). 없으면 밝게
+const FONT_KEY = 'memo_font';     // 본문 글자 크기(px). 없으면 기본(PC 14, 휴대폰 17)
+const FONT_MIN = 12, FONT_MAX = 28;
+const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function themeSetting() {
+  const t = store.getItem(THEME_KEY);
+  return t === 'dark' || t === 'system' ? t : 'light';
+}
+function applyTheme() {
+  const t = themeSetting();
+  const dark = t === 'dark' || (t === 'system' && !!darkQuery && darkQuery.matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  // 휴대폰 위 알림 줄·PC 앱 창 제목 줄 색도 맞춘다
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', dark ? '#1c1916' : '#fff1e5');
+}
+// '기기 설정 따름'이면 기기에서 어두운 모드를 켜고 끌 때 바로 따라간다
+if (darkQuery) darkQuery.addEventListener('change', () => { if (themeSetting() === 'system') applyTheme(); });
+
+function fontSetting() {
+  const n = Number(store.getItem(FONT_KEY));
+  return n >= FONT_MIN && n <= FONT_MAX ? n : 0;   // 0 = 기본
+}
+function defaultFontPx() {
+  return window.matchMedia && window.matchMedia('(max-width: 768px) and (pointer: coarse)').matches ? 17 : 14;
+}
+function applyFont() {
+  const n = fontSetting();
+  const root = document.documentElement.style;
+  if (n) {
+    root.setProperty('--editor-font', n + 'px');
+    root.setProperty('--title-font', Math.round(n * 1.15) + 'px');
+  } else {
+    root.removeProperty('--editor-font');
+    root.removeProperty('--title-font');
+  }
+  // 본문 겹침층(형광펜·찾기 표시)도 같은 크기로 다시 맞춘다
+  const hl = document.getElementById('editor-highlight');
+  if (hl) hl.scrollTop = editor.scrollTop;
+}
+
+function showDisplaySettings() {
+  if (document.querySelector('.disp-box')) return;
+  const o = document.createElement('div');
+  o.className = 'modal-overlay';
+  o.innerHTML = `
+    <div class="modal-box disp-box">
+      <div class="trash-head"><h3>화면 설정</h3><button class="fm-icon-btn" data-disp="close" type="button" title="닫기">${ico('close')}</button></div>
+      <div class="disp-label">화면</div>
+      <div class="disp-seg" role="radiogroup" aria-label="화면">
+        <button type="button" role="radio" data-theme-set="light">${ico('sun')}<span>밝게</span></button>
+        <button type="button" role="radio" data-theme-set="dark">${ico('moon')}<span>어둡게</span></button>
+        <button type="button" role="radio" data-theme-set="system">${ico('contrast')}<span>기기 설정 따름</span></button>
+      </div>
+      <div class="disp-label">글자 크기 <span class="disp-px"></span></div>
+      <div class="disp-font">
+        <button type="button" class="disp-step" data-step="-1" title="작게" aria-label="글자 작게">가</button>
+        <input type="range" min="${FONT_MIN}" max="${FONT_MAX}" step="1" aria-label="글자 크기">
+        <button type="button" class="disp-step big" data-step="1" title="크게" aria-label="글자 크게">가</button>
+      </div>
+      <div class="disp-preview">오늘 회의에서 논의한 내용을 정리하면 다음과 같다.
+취재원과 통화했고 기사 방향을 다시 잡았다.</div>
+      <div class="disp-foot"><button type="button" class="trash-link" data-disp="reset">기본 크기로</button></div>
+    </div>`;
+  const range = o.querySelector('input[type="range"]');
+  const paint = () => {
+    const t = themeSetting();
+    o.querySelectorAll('[data-theme-set]').forEach((b) => {
+      const on = b.dataset.themeSet === t;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+    const n = fontSetting();
+    const px = n || defaultFontPx();
+    range.value = px;
+    o.querySelector('.disp-px').textContent = px + (n ? '' : ' (기본)');
+    o.querySelector('.disp-preview').style.fontSize = px + 'px';
+    o.querySelector('[data-disp="reset"]').hidden = !n;
+  };
+  const setFont = (px) => {
+    px = Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(px)));
+    if (px === defaultFontPx()) store.removeItem(FONT_KEY); else store.setItem(FONT_KEY, String(px));
+    applyFont();
+    paint();
+  };
+  range.addEventListener('input', () => setFont(Number(range.value)));
+  o.addEventListener('click', (e) => {
+    if (e.target === o) { o.remove(); return; }
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.disp === 'close') { o.remove(); return; }
+    if (b.dataset.disp === 'reset') { store.removeItem(FONT_KEY); applyFont(); paint(); return; }
+    if (b.dataset.themeSet) { store.setItem(THEME_KEY, b.dataset.themeSet); applyTheme(); paint(); return; }
+    if (b.dataset.step) setFont((fontSetting() || defaultFontPx()) + Number(b.dataset.step));
+  });
+  document.body.appendChild(o);
+  paint();
 }
 
 // ── 화면 설정 기억 (정렬·보던 폴더·즐겨찾기 필터) ──
@@ -3233,6 +3342,9 @@ function updateFavButton(memo) {
 function onExternalStorageChange(e) {
   const key = store.nameOf(e.key);   // 다른 칸(시범 운전 등)의 신호는 무시
   if (key === 'last_saved_at' || key === 'last_synced_at' || key === 'pending_sync') { updateSaveSyncTimes(); return; }
+  // 다른 창(새 창 등)에서 바꾼 화면 설정도 바로
+  if (key === THEME_KEY) { applyTheme(); return; }
+  if (key === FONT_KEY) { applyFont(); return; }
   if (key !== 'memos') return; // saveLocalData는 항상 memos를 함께 저장하므로 이 키만 보면 됨
   // 이 창에 열린 빈 새 글(아직 아무것도 안 씀)은 다른 창이 '빈 글 정리'로 지워도 이 창에선 남긴다 —
   // Ctrl+N 새 창에서 쓰기 시작하기 전에 목록 창이 정리해 버리면 새 창의 글이 닫혔다
@@ -3916,6 +4028,7 @@ function showHelpDialog() {
           <li>${ico('template')} 템플릿 저장·불러오기 · ${ico('copy')} 본문만 복사 · ${ico('book')} 읽기 전용 보기</li>
           <li>형광펜(<kbd>Alt</kbd>+<kbd>H</kbd>, 휴대폰은 더보기의 ${ico('marker')})은 앱 안에서만 보이는 표시예요 — 복사·붙여넣기하면 순수 글자만 오갑니다</li>
           <li>글 목록에서 <b>더블클릭</b>하면 새 창으로 열립니다</li>
+          <li>${ico('type')} 화면 설정 — 어두운 화면(밝게·어둡게·기기 설정 따름)과 글자 크기(모든 글 공통). 더보기 또는 목록 아래 '화면'</li>
         </ul>
         <p class="help-h">💾 저장·백업·보안</p>
         <ul>

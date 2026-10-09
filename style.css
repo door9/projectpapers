@@ -5,12 +5,47 @@
   --bg2: #f6e9d8;
   --bg3: #e8d6c3;
   --accent: #990f3d;
+  --accent-fill: #990f3d;   /* 채운 단추 바탕(흰 글자) */
   --text: #33302e;
   --text2: #707070;
   --border: #ccc1b7;
   --card: #ffffff;
   --success: #09814a;
+  --hl: #f0f87a;            /* 형광펜·찾기 결과 */
+  --hl-current: #ff9632;    /* 찾기 '지금' 위치 */
+  --sel: #f9e4ea;           /* 고른 줄·충돌본 막대 */
+  --diff-del: #f9e4ea;      /* 비교: 원본에만 */
+  --diff-add: #e2f1e6;      /* 비교: 충돌본에만 */
+  --star-bg: #fff8e1;
+  --flash: #fbe3a6;
+  --menu-bg: #33302e;       /* 휴대폰 햄버거 단추 */
+  --menu-fg: #fff1e5;
   --radius: 4px;
+  color-scheme: light;
+}
+
+/* 어두운 화면 — html[data-theme="dark"] (화면 설정: 어둡게, 또는 '기기 설정 따름'에서 기기가 어두운 모드일 때) */
+:root[data-theme="dark"] {
+  --bg: #1c1916;
+  --bg2: #302a26;
+  --bg3: #3d3530;
+  --accent: #e5809b;        /* 어두운 바탕 위 글자·선 */
+  --accent-fill: #b02a52;   /* 채운 단추 바탕 */
+  --text: #ece5dd;
+  --text2: #a89f96;
+  --border: #4a423b;
+  --card: #24201d;
+  --success: #5cc48a;
+  --hl: #5d5a1f;
+  --hl-current: #8c4a14;
+  --sel: #452833;
+  --diff-del: #4a2632;
+  --diff-add: #213d2c;
+  --star-bg: #3b311c;
+  --flash: #5a4a1f;
+  --menu-bg: #3d3530;
+  --menu-fg: #ece5dd;
+  color-scheme: dark;       /* 고르기 상자·스크롤 막대 같은 기본 부품도 어둡게 */
 }
 
 html, body {
@@ -149,7 +184,7 @@ html, body {
 .btn:hover { opacity: 0.85; }
 
 .btn-primary {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: #fff;
   flex: 1;
 }
@@ -169,7 +204,7 @@ html, body {
   flex-shrink: 0;
 }
 .btn-fav-filter.active {
-  background: #fff8e1;
+  background: var(--star-bg);
   color: #e6a817;
   border-color: #e6a817;
 }
@@ -201,9 +236,9 @@ html, body {
   flex-shrink: 0;
 }
 .btn-select-mode.active {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: #fff;
-  border-color: var(--accent);
+  border-color: var(--accent-fill);
 }
 #bulk-actions {
   display: flex;
@@ -353,7 +388,7 @@ html, body {
   gap: 10px;
   padding: 6px 10px;
   border-radius: var(--radius);
-  background: #f9e4ea;
+  background: var(--sel);
   color: var(--accent);
   font-size: 0.78rem;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -602,7 +637,7 @@ html, body {
   user-select: none;
 }
 .fm-row:hover, .fm-row.menu-open { background: var(--bg); }
-.fm-row.selected { background: #f9e4ea; }
+.fm-row.selected { background: var(--sel); }
 /* 체크박스는 한 줄로 맞추고, 하위 폴더는 손잡이부터 들여 쓴다 */
 .fm-row.fm-d2 .fm-grip { margin-left: 28px; }
 .fm-row.fm-d3 .fm-grip { margin-left: 56px; }
@@ -761,14 +796,14 @@ body.fm-drag-on, body.fm-drag-on * { cursor: grabbing !important; user-select: n
   margin: 0 auto 0 6px;
   padding: 1px 7px;
   border-radius: 9px;
-  background: var(--accent);
+  background: var(--accent-fill);
   color: #fff;
   font-size: 0.62rem;
   font-weight: 600;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 .fm-row.fm-flash { animation: fm-flash 1.6s ease-out; }
-@keyframes fm-flash { 0%, 35% { background: #fbe3a6; } 100% { background: transparent; } }
+@keyframes fm-flash { 0%, 35% { background: var(--flash); } 100% { background: transparent; } }
 
 @media (max-width: 768px) {
   #folder-manager { background: var(--card); align-items: stretch; }
@@ -864,7 +899,7 @@ body.fm-drag-on, body.fm-drag-on * { cursor: grabbing !important; user-select: n
   text-overflow: ellipsis;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
-.memo-item-snippet b { color: var(--text); font-weight: 700; background: #f0f87a; }
+.memo-item-snippet b { color: var(--text); font-weight: 700; background: var(--hl); }
 .memo-list-divider {
   display: flex;
   align-items: center;
@@ -1094,7 +1129,7 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
-  font-size: 1.1rem;
+  font-size: var(--title-font, 1.1rem);
   font-weight: 600;
   font-family: 'Georgia', 'Times New Roman', serif;
   outline: none;
@@ -1124,7 +1159,7 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
 .folder-item-name .ico { width: 1em; height: 1em; vertical-align: -0.12em; }
 /* 즐겨찾기 켜짐(★): 별 속을 채운다 */
 .btn-icon.fav-active .ico, .btn-fav-filter.active .ico { fill: currentColor; }
-.btn-icon.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn-icon.active { background: var(--accent-fill); color: #fff; border-color: var(--accent-fill); }
 .btn-icon.fav-active { color: #e6a817; background: var(--bg); border-color: var(--border); }
 
 #editor-container {
@@ -1140,7 +1175,7 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   top: 0; left: 0; right: 0; bottom: 0;
   padding: 20px;
   font-family: 'Gulim', '굴림', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 14px !important;
+  font-size: var(--editor-font, 14px) !important;
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1155,13 +1190,13 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
 #editor-highlight mark.user,
 #editor-highlight mark.search,
 #editor-highlight mark.search-current {
-  background: #f0f87a;
+  background: var(--hl);
   color: transparent;
   border-radius: 2px;
 }
 
 #editor-highlight mark.search-current {
-  background: #ff9632;
+  background: var(--hl-current);
 }
 
 #editor {
@@ -1171,7 +1206,7 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   border: none;
   color: var(--text);
   font-family: 'Gulim', '굴림', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 14px !important;
+  font-size: var(--editor-font, 14px) !important;
   line-height: 1.7;
   resize: none;
   outline: none;
@@ -1417,13 +1452,69 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   line-height: 1.6;
 }
 .cmp-line { padding: 1px 10px; white-space: pre-wrap; word-break: break-word; }
-.cmp-del { background: #f9e4ea; }
+.cmp-del { background: var(--diff-del); }
 .cmp-line.cmp-del { box-shadow: inset 3px 0 0 var(--accent); }
-.cmp-add { background: #e2f1e6; }
+.cmp-add { background: var(--diff-add); }
 .cmp-line.cmp-add { box-shadow: inset 3px 0 0 var(--success); }
 .cmp-fold { padding: 2px 10px; font-size: 0.72rem; color: var(--text2); background: var(--bg); text-align: center; }
 .cmp-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 10px; }
 .modal-box .cmp-foot .btn { flex: 0 0 auto; margin: 0; }
+
+/* 화면 설정 — 어두운 화면 · 글자 크기 */
+.modal-box.disp-box {
+  max-width: 400px;
+  text-align: left;
+  padding: 14px 18px 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.disp-box .trash-head h3 { font-family: 'Georgia', 'Times New Roman', serif; }
+.disp-label { display: flex; justify-content: space-between; align-items: baseline; margin: 14px 0 8px; font-size: 0.8rem; font-weight: 600; color: var(--text2); }
+.disp-px { font-weight: 400; }
+.disp-seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.disp-seg button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.disp-seg button .ico { width: 20px; height: 20px; }
+.disp-seg button.on { background: var(--card); border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); font-weight: 600; }
+.disp-font { display: flex; align-items: center; gap: 10px; }
+.disp-font input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.disp-step {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Gulim', '굴림', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 12px;
+  cursor: pointer;
+}
+.disp-step.big { font-size: 20px; }
+.disp-preview {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  font-family: 'Gulim', '굴림', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  line-height: 1.7;
+  max-height: 160px;
+  overflow: hidden;
+}
+.disp-foot { display: flex; justify-content: flex-start; margin-top: 10px; }
 
 /* legacy compat */
 .delete-confirm { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
@@ -1461,10 +1552,10 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   z-index: 50;
   width: 36px;
   height: 36px;
-  background: var(--text);
+  background: var(--menu-bg);
   border: none;
   border-radius: var(--radius);
-  color: var(--bg);
+  color: var(--menu-fg);
   font-size: 1rem;
   cursor: pointer;
   transition: width 0.2s, height 0.2s, top 0.2s, left 0.2s, border-radius 0.2s, font-size 0.2s;
@@ -1527,8 +1618,8 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
 @media (max-width: 768px) and (pointer: coarse) {
   .memo-item-title { font-size: 0.92rem; }
   .memo-item-date { font-size: 0.75rem; }
-  #memo-title-input { font-size: 19px; padding: 8px 10px; }
-  #editor, #editor-highlight { font-size: 17px !important; }
+  #memo-title-input { font-size: var(--title-font, 19px); padding: 8px 10px; }
+  #editor, #editor-highlight { font-size: var(--editor-font, 17px) !important; }
   #search-box { font-size: 0.92rem; }
   .btn { font-size: 0.9rem; }
   .folder-item { font-size: 0.92rem; }
