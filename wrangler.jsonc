@@ -1,0 +1,8 @@
+// Cloudflare 배포 설정 — 이 저장소의 앱 파일을 그대로 올린다(.assetsignore에 적은 것은 빼고).
+// 주소 https://projectpapers.door9labs.workers.dev — 잠금(Cloudflare Access)은 Cloudflare 관리 화면에서 건다.
+{
+  "name": "projectpapers",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "." },
+  "preview_urls": false
+}

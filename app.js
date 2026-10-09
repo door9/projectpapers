@@ -155,6 +155,13 @@ async function init() {
   loadLocalData();
   cleanupEmptyMemo();
 
+  // Cloudflare 잠금에 다시 로그인하고 돌아온 주소(?login=1)는 지운다
+  if (PAGE_PARAMS.has('login')) {
+    const p = new URLSearchParams(location.search);
+    p.delete('login');
+    history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p : '') + location.hash);
+  }
+
   // 옛 주소(/project-papers/)의 안내 페이지에서 넘어왔다 = 설치해 둔 앱이 아직 옛 주소를 가리킨다
   if (PAGE_PARAMS.get('moved') === '1') {
     const p = new URLSearchParams(location.search);
@@ -4434,11 +4441,21 @@ function setSyncStatus(cls, text) {
 }
 
 let toastTimer = null;
-function showToast(msg) {
+// opts: { action: '단추 글', onAction: 누르면 할 일, duration: 보이는 시간(ms) } — 없으면 예전처럼 글만 잠깐
+function showToast(msg, opts) {
   toast.textContent = msg;
+  const action = opts && opts.action;
+  toast.classList.toggle('has-action', !!action);
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'toast-action';
+    b.textContent = action;
+    b.addEventListener('click', () => { toast.classList.remove('show'); opts.onAction(); });
+    toast.appendChild(b);
+  }
   toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 2500);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), (opts && opts.duration) || 2500);
 }
 
 function formatDate(ts) {
@@ -4466,10 +4483,28 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+// ── Cloudflare 잠금(Access) 로그인 만료 ──
+// 로그인이 만료되면 앱은 기기에 저장해 둔 사본으로 열리지만 새 버전을 못 받는다 — 알리고 다시 로그인하게 한다.
+// 잠금이 없는 곳(GitHub Pages)에서는 sw.js 가 그대로 받아지므로 아무 일도 없다
+let loginAsked = false;
+function loginExpired() {
+  if (!navigator.onLine) return Promise.resolve(false);   // 통신이 안 되면 묻지 않는다(콘솔에 오류만 남는다)
+  return fetch('sw.js', { cache: 'no-store', redirect: 'manual' }).then((res) => res.type === 'opaqueredirect').catch(() => false);
+}
+async function checkLogin() {
+  if (!(await loginExpired())) return false;
+  if (!loginAsked) {   // 한 번 열 때 한 번만
+    loginAsked = true;
+    showToast('로그인이 만료되어 새 버전을 받지 못합니다.', { action: '다시 로그인', onAction: () => location.assign('./?login=1'), duration: 15000 });
+  }
+  return true;
+}
+
 // ── Service Worker ──
 if ('serviceWorker' in navigator) {
   const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register('sw.js').catch(() => {});
+  checkLogin();
   // 새 버전이 깔리면 쓰던 글을 기기에 저장하고 새 코드로 다시 연다.
   // 휴대폰은 앱을 닫지 않고 오래 띄워 두므로, 배포 뒤에도 옛 코드가 바뀐 동기화 규칙을 모른 채 계속 저장을 올린다
   navigator.serviceWorker.addEventListener('controllerchange', () => {
@@ -4482,7 +4517,10 @@ if ('serviceWorker' in navigator) {
 }
 
 // 새 버전이 나왔는지 확인 (앱으로 돌아올 때마다). 있으면 설치 → controllerchange → 다시 열기
+// 그 전에 잠금 로그인이 만료됐는지 본다(만료면 받을 수 없으니 안내만)
 function checkForUpdate() {
   if (!('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.getRegistration().then((r) => r && r.update()).catch(() => {});
+  checkLogin().then((expired) => {
+    if (!expired) navigator.serviceWorker.getRegistration().then((r) => r && r.update()).catch(() => {});
+  });
 }
