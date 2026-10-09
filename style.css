@@ -1235,7 +1235,7 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
 /* Empty state */
 #empty-state {
   flex: 1;
-  min-height: 0;   /* 최근 글이 화면보다 길면 이 칸 안에서 굴려 내려 본다(없으면 잘린 채 굴러가지 않았다) */
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1243,8 +1243,7 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   color: var(--text2);
   font-size: 1.1rem;
   gap: 12px;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow: hidden;   /* 첫 화면 자체는 굴러가지 않는다 — 글이 많으면 최근 글 상자 안에서만 굴러간다 */
 }
 /* 이 부분을 누르면 새 글 */
 .empty-hero { display: flex; flex-direction: column; align-items: center; gap: 12px; cursor: pointer; flex-shrink: 0; }
@@ -1256,7 +1255,8 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   #recent-list:not(:empty) {
     display: flex;
     flex-direction: column;
-    flex-shrink: 0;   /* 줄어들지 않고 길이대로 — 넘치는 만큼 위 칸이 굴러간다 */
+    flex: 0 1 auto;   /* 글이 적으면 그 길이만큼, 많으면 화면 아래 끝까지 — 나머지는 상자 안에서 굴러간다 */
+    min-height: 0;
     width: 100%;
     max-width: 480px;
     margin-top: 14px;
@@ -1266,8 +1266,18 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
     overflow: hidden;
   }
 }
-.recent-head { padding: 7px 12px 4px; font-size: 0.72rem; font-weight: 600; color: var(--text2); }
+.recent-head { flex-shrink: 0; padding: 7px 12px 4px; border-bottom: 1px solid var(--bg2); font-size: 0.72rem; font-weight: 600; color: var(--text2); }
+/* 글 줄만 굴러가고 '최근 글'·'모든 글 보기'는 상자 위아래에 붙어 있다. 끝까지 굴려도 화면 전체로 번지지 않게(contain) */
+.recent-scroll {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
 .recent-item {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1280,10 +1290,12 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   text-align: left;
   cursor: pointer;
 }
+.recent-item:first-child { border-top: none; }   /* 제목 아래 선은 '최근 글' 쪽에 — 굴려도 남는다 */
 .recent-item:hover { background: var(--bg); }
 .recent-title { flex: 1; min-width: 0; font-size: 0.86rem; font-weight: 600; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recent-date { flex-shrink: 0; font-size: 0.7rem; color: var(--text2); }
 .recent-all {
+  flex-shrink: 0;
   padding: 8px 12px;
   background: var(--bg);
   border: none;

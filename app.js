@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '160';
+const APP_VERSION = '161';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -3390,7 +3390,7 @@ function showEditor(memo) {
   editorToolbar.style.display = 'flex';
   editorContainer.style.display = 'flex';
   $('#char-count').style.display = 'flex';
-  if (emptyState.style.display !== 'none') emptyScrollTop = emptyState.scrollTop;   // 최근 글을 어디까지 내려 봤는지
+  if (emptyState.style.display !== 'none') emptyScrollTop = recentScrollTop();   // 최근 글을 어디까지 내려 봤는지
   emptyState.style.display = 'none';
   titleInput.value = memo.title;
   editor.value = memo.content;
@@ -3436,7 +3436,7 @@ function hideEditor() {
   emptyState.style.display = 'flex';
   if (!document.body.classList.contains('popup-mode')) store.removeItem('open_memo');
   renderRecentList();
-  emptyState.scrollTop = emptyScrollTop;   // 글을 열기 전 보던 자리로
+  setRecentScrollTop(emptyScrollTop);   // 글을 열기 전 보던 자리로
   // 삭제 등 다른 이유로 글이 닫히면 쌓아 둔 기록 칸도 거둬, 다음 뒤로가기가 헛돌지 않게 한다
   layersChanged();
 }
@@ -5164,22 +5164,36 @@ function searchSnippet(m, q) {
 }
 
 // 빈 화면(There you are) 아래 최근 글 — 휴대폰에서 앱을 열면 목록을 열지 않고도 바로 고를 수 있게(넓은 화면에선 숨김)
-// 최근 수정한 순으로 전부 — 굴려 내려 옛 글까지 본다(잠긴·휴면 폴더 글은 빼고). 바뀐 게 없으면 다시 그리지 않는다(보던 자리 유지)
+// 최근 수정한 순으로 전부(잠긴·휴면 폴더 글은 빼고) — 첫 화면은 그대로 두고 최근 글 상자 안에서만 굴려 옛 글까지 본다.
+// 바뀐 게 없으면 다시 그리지 않고, 다시 그려도 굴려 둔 자리는 그대로
 function renderRecentList() {
   const box = document.getElementById('recent-list');
   if (!box) return;
-  const put = (html) => { if (box._html !== html) { box.innerHTML = html; box._html = html; } };
+  const put = (html) => {
+    if (box._html === html) return;
+    const top = recentScrollTop();
+    box.innerHTML = html; box._html = html;
+    setRecentScrollTop(top);
+  };
   if (emptyState.style.display === 'none' || !memos.length) { put(''); return; }
   const hidden = new Set([...getLockedFolderIds(), ...getDormantFolderIds()]);
   const recent = memos.filter((m) => !isBlankMemo(m) && !hidden.has(m.folder))
     .sort((a, b) => b.updatedAt - a.updatedAt);
   if (!recent.length) { put(''); return; }
-  put('<div class="recent-head">최근 글</div>' + recent.map((m) =>
+  put('<div class="recent-head">최근 글</div><div class="recent-scroll">' + recent.map((m) =>
     `<button class="recent-item" type="button" data-id="${m.id}"><span class="recent-title">${escapeHtml(m.title || formatCreatedAt(m.createdAt) + ' 새 글')}</span><span class="recent-date">${formatDate(m.updatedAt)}</span></button>`).join('') +
-    '<button class="recent-all" type="button">모든 글 보기</button>');
+    '</div><button class="recent-all" type="button">모든 글 보기</button>');
 }
-// 첫 화면(최근 글)에서 글을 열었다 돌아오면 보던 자리로
+// 최근 글 상자를 굴려 둔 자리 — 글을 열었다 돌아오면 보던 자리로
 let emptyScrollTop = 0;
+function recentScrollTop() {
+  const sc = document.querySelector('#recent-list .recent-scroll');
+  return sc ? sc.scrollTop : 0;
+}
+function setRecentScrollTop(top) {
+  const sc = document.querySelector('#recent-list .recent-scroll');
+  if (sc) sc.scrollTop = top;
+}
 
 // ── UI Helpers ──
 function showApp() {
