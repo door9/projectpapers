@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '161';
+const APP_VERSION = '162';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -477,9 +477,10 @@ async function init() {
       loadMemoInEditor(memo);
     }
   } else {
-    // 다시 열면 쓰던 글을 쓰던 자리 그대로 연다 — 새 버전으로 다시 열렸을 때(reopen_memo)와,
-    // 휴대폰이 앱을 내렸다가 다시 열 때(open_memo: 글을 연 채 앱을 떠났으면 남아 있다). 잠긴 폴더 글은 열지 않는다
-    const reopenId = sessionStorage.getItem('reopen_memo') || store.getItem('open_memo');
+    // 앱을 켜면 늘 첫 화면(There you are·최근 글). 새 버전을 받아 저절로 다시 열렸을 때만 쓰던 글을 쓰던 자리 그대로 연다.
+    // 잠긴 폴더 글은 열지 않는다
+    store.removeItem('open_memo');   // 판 158~161 이 남긴 '마지막에 연 글' 기록 — 이제 쓰지 않는다
+    const reopenId = sessionStorage.getItem('reopen_memo');
     sessionStorage.removeItem('reopen_memo');
     const memo = reopenId && memos.find((m) => m.id === reopenId);
     if (memo && accessToken && !isFolderLocked(memo.folder)) loadMemoInEditor(memo, { restorePos: true });
@@ -3419,8 +3420,6 @@ function showEditor(memo) {
   document.body.classList.remove('toolbar-hidden');
   lastEditorScrollTop = 0;
   updateConflictBar(memo);
-  // 다시 열 때 이 글부터(휴대폰이 앱을 내려도) — 새 창은 따로 기억하지 않는다
-  if (!document.body.classList.contains('popup-mode')) store.setItem('open_memo', memo.id);
   // 뒤로가기(모바일 제스처)가 앱을 끄지 않고 글을 먼저 닫게 한다
   layersChanged();
 }
@@ -3434,7 +3433,6 @@ function hideEditor() {
   $('#memo-dates').style.display = 'none';
   $('#conflict-bar').style.display = 'none';
   emptyState.style.display = 'flex';
-  if (!document.body.classList.contains('popup-mode')) store.removeItem('open_memo');
   renderRecentList();
   setRecentScrollTop(emptyScrollTop);   // 글을 열기 전 보던 자리로
   // 삭제 등 다른 이유로 글이 닫히면 쌓아 둔 기록 칸도 거둬, 다음 뒤로가기가 헛돌지 않게 한다
@@ -3513,7 +3511,7 @@ function applyEditable() {
   titleInput.readOnly = ro;
 }
 
-// 쓰던 자리(커서·스크롤) 기억 — 앱이 내려갔다 다시 열리거나 새 버전으로 다시 열려도 그 자리로
+// 쓰던 자리(커서·스크롤) 기억 — 새 버전을 받아 저절로 다시 열릴 때 그 자리로
 function saveEditorPos() {
   if (!currentId || document.body.classList.contains('popup-mode')) return;
   store.setItem('open_pos', JSON.stringify({ id: currentId, s: editor.selectionStart, e: editor.selectionEnd, top: editor.scrollTop }));
@@ -3816,7 +3814,6 @@ function flushSave() {
     }
   }
   if (localSaveTimer) saveLocalData();   // 모아 두던 기기 저장을 지금 끝낸다
-  saveEditorPos();                       // 다시 열 때 쓰던 자리로
   // 아직 못 보낸 변경이 있으면 기다리지 않고 지금 바로 보낸다.
   // (예전에는 '대기 중인 전송'이 있을 때만 보내서, 타이핑 1.5초 안에 앱을 벗어나면 아무것도 안 갔다)
   // 새 버전으로 다시 여는 중이면 올리지 않는다 — 새 코드가 열리자마자 이어서 올린다
