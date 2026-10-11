@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '163';
+const APP_VERSION = '164';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -3652,9 +3652,9 @@ function updateFolderSelect(selectedFolder) {
   const btn = $('#btn-folder-select');
   if (btn) btn.title = `폴더: ${folderName}`;
 
-  // 드롭다운 리스트 생성
+  // 드롭다운 리스트 생성 — 휴면 폴더(와 그 아래 폴더)는 고를 수 없다(여러 글 옮기기 대화상자와 같게)
   let html = `<div class="folder-select-item ${!selectedFolder ? 'active' : ''}" data-folder="">-- 폴더 없음 --</div>`;
-  for (const { f, depth } of folderTree(topFoldersInOrder())) {
+  for (const { f, depth } of folderTree(folders.filter((x) => !x.parentId && !x.dormant).sort(sortBySortOrder))) {
     const cls = depth === 2 ? ' folder-select-item--child' : depth === 3 ? ' folder-select-item--grand' : '';
     html += `<div class="folder-select-item${cls} ${f.id === selectedFolder ? 'active' : ''}" data-folder="${f.id}">${depth > 1 ? '└ ' : ''}${escapeHtml(f.name)}</div>`;
   }
