@@ -575,7 +575,7 @@ function watchIsLive() {
 }
 
 function startWatch() {
-  if (!WATCH_ON || !SPLIT_SYNC || !accessToken || watchCtl || document.visibilityState !== 'visible') return;
+  if (!WATCH_ON || !SPLIT_SYNC || !accessToken || !syncLeader || watchCtl || document.visibilityState !== 'visible') return;
   const ctl = new AbortController();
   watchCtl = ctl;
   watchLoop(ctl).finally(() => { if (watchCtl === ctl) { watchCtl = null; watchSince = 0; } });
@@ -598,7 +598,7 @@ function waitOrStop(ms, signal) {
 
 async function watchLoop(ctl) {
   let failures = 0;
-  while (watchCtl === ctl && !ctl.signal.aborted && accessToken && document.visibilityState === 'visible') {
+  while (watchCtl === ctl && !ctl.signal.aborted && accessToken && syncLeader && document.visibilityState === 'visible') {
     const cursor = store.getItem('split_cursor');
     if (!cursor || store.getItem('split_ready') !== '1') { watchSince = 0; await waitOrStop(30000, ctl.signal); continue; }
     try {
@@ -612,14 +612,15 @@ async function watchLoop(ctl) {
       if (res.status === 400 || res.status === 409) {
         // 커서가 낡았다 — 받기를 한 번 해서 새 커서를 만든 뒤 다시 건다
         watchSince = 0;
-        await syncFromDropbox();
+        await syncFromDropbox({ push: false });
         await waitOrStop(5000, ctl.signal);
         continue;
       }
       if (!res.ok) throw new Error('longpoll ' + res.status);
       const data = await res.json();
       failures = 0;
-      if (data.changes && !ctl.signal.aborted) await syncFromDropbox();
+      // 받기만 — 내가 올린 것에도 알림이 온다. 못 보낸 변경은 정해진 간격대로 올린다(알림마다 올리면 글자 몇 개마다 올린다)
+      if (data.changes && !ctl.signal.aborted) await syncFromDropbox({ push: false });
       if (data.backoff) { watchSince = 0; await waitOrStop(data.backoff * 1000, ctl.signal); }
     } catch (e) {
       if (ctl.signal.aborted) break;

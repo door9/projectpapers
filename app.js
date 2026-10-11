@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '162';
+const APP_VERSION = '163';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -113,10 +113,71 @@ function setRev(rev) {
   if (rev) store.setItem('dbx_rev', rev); else store.removeItem('dbx_rev');
 }
 
-// 동기화 작업은 한 번에 하나씩 — 받기·올리기가 겹치면 같은 버전으로 두 번 올리다 충돌한다
+// ── 같은 기기의 여러 창: Dropbox 와 주고받는 창은 하나만 ──
+// 목록 창과 글 쓰기 창(새 창)이 함께 열려 있으면 예전엔 창마다 따로 받고 올렸다. 한 창이 올리면 다른 창이 변경 알림을 듣고
+// 받은 뒤 자기 사본(조금 옛것)을 또 올려, 두 창이 글자 몇 개마다 번갈아 올렸다. 그사이 쓰던 창의 글이 다른 창의 옛 사본으로
+// 바뀌어 방금 친 글자가 사라지거나, 한 기기 안에서 충돌본이 생겼다(2026-10-11).
+// 이제 마지막으로 누른(또는 처음 연) 창 하나만 Dropbox 와 주고받는다. 다른 창은 기기 저장만 쓰고, 바뀐 것은 storage 신호로 받는다.
+// 창 사이 차례는 브라우저 잠금(Web Locks)으로 정한다 — 주고받던 창을 닫으면 줄 서 있던 창이 이어받는다
+const HAS_LOCKS = !!(navigator.locks && navigator.locks.request);
+const LEADER_LOCK = 'pp-sync:' + STORE_NS + DBX_ROOT;
+const RUN_LOCK = 'pp-sync-run:' + STORE_NS + DBX_ROOT;
+let syncLeader = !HAS_LOCKS;   // 잠금이 없는 브라우저면 예전처럼 모든 창이 주고받는다
+let leaderQueued = false;      // 줄 서 둔 요청이 있다(주고받던 창이 닫히면 이어받는다)
+let leaderStealing = false;    // 넘겨받기 요청이 가는 중 — 두 번 보내면 이 창이 제 잠금을 빼앗아 손을 뗀 것으로 착각한다
+let leaderReq = 0;
+let leaderHeldBy = 0;          // 지금 잠금을 쥔 이 창의 요청 번호
+// steal: 지금 주고받는 창에게서 넘겨받는다(이 창을 눌렀을 때). 아니면 줄을 선다
+function claimSyncLeader(steal) {
+  if (!HAS_LOCKS || syncLeader) return;
+  if (steal) { if (leaderStealing) return; leaderStealing = true; }
+  else { if (leaderQueued) return; leaderQueued = true; }
+  const id = ++leaderReq;
+  const done = () => { if (steal) leaderStealing = false; else leaderQueued = false; };
+  navigator.locks.request(LEADER_LOCK, steal ? { steal: true } : {}, () => {
+    done();
+    leaderHeldBy = id;
+    becomeSyncLeader();
+    return new Promise(() => {});   // 이 창이 닫히거나 다른 창이 넘겨받을 때까지 쥐고 있는다
+  }).catch(() => {
+    if (leaderHeldBy !== id) { done(); return; }   // 쥔 적 없는 요청 — 손 뗄 것이 없다
+    // 다른 창이 넘겨받았다 — 손을 떼고, 그 창이 닫히면 이어받게 줄을 선다
+    leaderHeldBy = 0;
+    if (syncLeader) loseSyncLeader();
+    claimSyncLeader(false);
+  });
+}
+function becomeSyncLeader() {
+  syncLeader = true;
+  if (!accessToken) return;
+  // 다른 창이 기기에 저장만 해 둔 변경이 있으면 이 받기·올리기로 함께 나간다
+  syncFromDropbox().then(() => { checkAutoBackup(); startWatch(); });
+}
+function loseSyncLeader() {
+  syncLeader = false;
+  stopWatch();
+  clearTimeout(syncTimer);
+  syncTimer = null;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+}
+// 안전장치: 잠금이 어떤 까닭으로든 오지 않아 아무 창도 Dropbox 와 주고받지 않는 일이 없게 —
+// 쥔 창이 하나도 없는데 이 창도 못 받았으면 잠금 없이 이 창이 맡는다(예전처럼)
+function leaderWatchdog() {
+  if (!HAS_LOCKS || syncLeader || !accessToken) return;
+  navigator.locks.query().then((s) => {
+    if (syncLeader || (s.held || []).some((l) => l.name === LEADER_LOCK)) return;
+    console.warn('동기화 차례 잠금이 오지 않아 이 창이 맡습니다');
+    becomeSyncLeader();
+  }).catch(() => {});
+}
+
+// 동기화 작업은 한 번에 하나씩 — 받기·올리기가 겹치면 같은 버전으로 두 번 올리다 충돌한다.
+// 창이 바뀌는 순간(넘겨받기) 앞 창이 하던 것과도 겹치지 않게 기기 전체에서 한 번에 하나(RUN_LOCK)
 let syncQueue = Promise.resolve();
 function queueSync(fn) {
-  const run = syncQueue.then(fn, fn);
+  const step = HAS_LOCKS ? () => navigator.locks.request(RUN_LOCK, () => fn()) : fn;
+  const run = syncQueue.then(step, step);
   syncQueue = run.catch(() => {});
   return run;
 }
@@ -205,7 +266,10 @@ async function init() {
 
   if (accessToken) {
     showApp();
-    syncFromDropbox().then(() => { checkAutoBackup(); startWatch(); });
+    // Dropbox 와 주고받는 창을 정한다 — 넘겨받으면(becomeSyncLeader) 받기·백업·변경 알림 듣기를 시작한다.
+    // 막 연 창(새 창 포함)이 앞에 있으면 그 창이 넘겨받는다
+    if (HAS_LOCKS) { claimSyncLeader(document.hasFocus()); setTimeout(leaderWatchdog, 5000); }
+    else becomeSyncLeader();
   } else {
     // 오프라인 모드: 백업 필요 플래그만 저장
     markAutoBackupPending();
@@ -232,12 +296,16 @@ async function init() {
   // 특히 휴대폰에서 홈으로 나가거나 앱을 전환할 때 beforeunload는 잘 안 불리므로 visibilitychange가 핵심
   window.addEventListener('beforeunload', flushSave);
   window.addEventListener('pagehide', flushSave);
-  // PC: 창을 떠나면(다른 창을 누르거나 휴대폰으로 옮겨 가기 전) 모아 둔 변경을 바로 올린다
+  // PC: 창을 떠나면(다른 창을 누르거나 휴대폰으로 옮겨 가기 전) 모아 둔 변경을 바로 올린다.
+  // 아직 기기에 안 쓴 글자부터 쓴다 — 다음에 누를 창이 넘겨받아 기기 저장에서 이어 올린다
   window.addEventListener('blur', () => {
+    if (localSaveTimer) saveLocalData();
     if (accessToken && isDirty() && !reloadingForUpdate) syncToDropboxIfDirty().catch(onSyncError);
   });
-  // PC: 창으로 돌아오면(다른 창을 눌렀다 다시 누름) 그사이 다른 기기에서 고친 것을 받는다
+  // PC: 창으로 돌아오면(다른 창을 눌렀다 다시 누름) 그사이 다른 기기에서 고친 것을 받는다.
+  // 같은 기기의 다른 창이 주고받고 있었으면 이 창이 넘겨받는다(넘겨받을 때 받기·알림 듣기를 한다)
   window.addEventListener('focus', () => {
+    if (!syncLeader) { claimSyncLeader(true); return; }
     if (!accessToken || document.visibilityState !== 'visible') return;
     if (Date.now() - lastPullAt > 30000) syncFromDropbox();
     startWatch();
@@ -1042,7 +1110,7 @@ function markAutoBackupPending() {
 
 let autoBackupRunning = false;   // 앱 열기·돌아오기가 겹쳐도 백업은 한 번만
 async function checkAutoBackup() {
-  if (!accessToken || autoBackupRunning) return;
+  if (!accessToken || autoBackupRunning || !syncLeader) return;
   const today = getTodayKST();
   const lastDate = store.getItem('auto_backup_date');
   if (lastDate === today) return; // 오늘 이미 백업함
@@ -1364,17 +1432,25 @@ function refreshOpenMemo() {
   if (!!memo.viewerMode !== viewerMode) applyViewerMode(!!memo.viewerMode);
   updateConflictBar(memo);
   repaintOverlay();   // 형광펜도 다른 기기에서 바뀌었을 수 있다
+  noteSeen(memo);
 }
 
 // 받기 + (보낼 게 있으면) 올리기. 이미 하고 있으면 그것을 함께 기다린다
 // (그사이 또 바뀌면 Dropbox 변경 알림이 다시 깨운다)
+// push=false: 변경 알림으로 받기만 할 때 — 못 보낸 변경은 정해진 간격(손 뗀 뒤 3초, 지난 올리기 10초 뒤)대로 올린다.
+// 예전엔 내가 올린 것에도 알림이 와서 받고, 쓰는 중이면 곧바로 또 올리기를 되풀이해 글자 몇 개마다 올렸다
 let syncInFlight = null;
-function syncFromDropbox() {
-  if (!accessToken) return Promise.resolve();
-  if (syncInFlight) return syncInFlight;
+function syncFromDropbox(opts = {}) {
+  if (!accessToken || !syncLeader) return Promise.resolve();   // 주고받는 창은 같은 기기에서 하나
+  const push = opts.push !== false;
+  if (syncInFlight) {
+    if (!push) return syncInFlight;
+    return syncInFlight.then(() => { if (isDirty()) return syncToDropboxIfDirty().catch(onSyncError); });
+  }
   setSyncStatus('syncing', '동기화 중...');
   const run = queueSync(async () => {
     try {
+      if (!syncLeader) { settleSyncStatus(); return; }   // 차례를 기다리는 사이 다른 창이 넘겨받았다
       const remoteMissing = await pullAndMerge();
       // Dropbox 에 파일이 없는데 이 기기도 비어 있으면, 빈 파일을 만들지 않고 멈춘다.
       // (저장 경로가 어긋났을 때 빈 파일이 생겨 노트가 사라진 것처럼 보이는 사고 방지)
@@ -1385,7 +1461,8 @@ function syncFromDropbox() {
         return;
       }
       // 이 기기에만 있는 변경이 있을 때만 올린다 (매번 900KB를 올리지 않게)
-      if (remoteMissing || isDirty()) await uploadNow();
+      if (remoteMissing || (push && isDirty())) await uploadNow();
+      else if (isDirty()) scheduleSyncToDropbox();
       settleSyncStatus('동기화 완료');
       renderAll();
       refreshOpenMemo();
@@ -1474,8 +1551,8 @@ function isLocalEmpty() {
 
 // force=true 는 사용자가 직접 전부 지운 경우처럼 빈 상태를 일부러 올릴 때만
 function syncToDropbox(force) {
-  if (!accessToken) return Promise.resolve();
-  return queueSync(() => uploadNow(force)).then(
+  if (!accessToken || !syncLeader) return Promise.resolve();
+  return queueSync(() => (syncLeader ? uploadNow(force) : undefined)).then(
     () => settleSyncStatus('동기화 완료'),
     (e) => { onSyncError(e); throw e; });
 }
@@ -1747,6 +1824,7 @@ function markSynced(base, clean = true) {
 function saveLocalData(changed = true) {
   clearTimeout(localSaveTimer);
   localSaveTimer = null;
+  if (currentId) noteSeen(memos.find((m) => m.id === currentId));   // 이 창이 저장한 모습 — 다른 창이 되돌려 저장해도 알아본다
   store.setItem('memos', JSON.stringify(memos));
   store.setItem('folders', JSON.stringify(folders));
   store.setItem('trash', JSON.stringify(trash));
@@ -3350,17 +3428,27 @@ function onExternalStorageChange(e) {
   // 이 창에 열린 빈 새 글(아직 아무것도 안 씀)은 다른 창이 '빈 글 정리'로 지워도 이 창에선 남긴다 —
   // Ctrl+N 새 창에서 쓰기 시작하기 전에 목록 창이 정리해 버리면 새 창의 글이 닫혔다
   const mine = currentId && memos.find((m) => m.id === currentId);
+  // 이 창에서 쓰는 중(창이 앞에 있고 입력칸에 커서)이거나 아직 기기에 안 쓴 글자가 있으면 열린 글은 이 창 것이 가장 새것이다.
+  // 다른 창이 저장한 그 글(조금 옛 사본)로 바꾸지 않는다 — 예전엔 바꿔 두었다가 받기가 편집기까지 그 사본으로 되돌려
+  // 방금 친 글자가 사라졌다(2026-10-11)
+  const busyHere = document.hasFocus() && (document.activeElement === editor || document.activeElement === titleInput);
+  const keep = mine && (busyHere || localSaveTimer)
+    ? { content: busyHere ? editor.value : lf(mine.content), title: busyHere ? titleInput.value : mine.title, updatedAt: mine.updatedAt, highlights: mine.highlights }
+    : null;
+  if (mine) noteSeen(mine);
   loadLocalData();
   if (mine && isBlankMemo(mine) && !memos.some((m) => m.id === mine.id) && !trash.some((t) => t.data && t.data.id === mine.id)) {
     memos.unshift(mine);
   }
+  if (keep) keepOwnEdits(keep);
   renderAll();
   updateSaveSyncTimes();
+  // 다른 창이 기기에 저장만 해 둔 변경 — Dropbox 와 주고받는 창이면 정해진 간격대로 올린다
+  if (syncLeader && isDirty()) scheduleSyncToDropbox();
+  notifyConflicts();
   if (!currentId) return;
   const memo = memos.find((m) => m.id === currentId);
   if (!memo) { currentId = null; hideEditor(); return; } // 다른 창에서 이 글이 삭제됨
-  // 이 창에서 직접 입력 중(창이 활성 + 입력칸 포커스)이면 본문을 덮어쓰지 않음(편집 손실 방지)
-  const busyHere = document.hasFocus() && (document.activeElement === editor || document.activeElement === titleInput);
   if (!busyHere) {
     const content = lf(memo.content);
     if (editor.value !== content) {
@@ -3375,9 +3463,35 @@ function onExternalStorageChange(e) {
     updateFavButton(memo);
     updateFolderSelect(memo.folder);
     repaintOverlay(); // 다른 창에서 바뀐 형광펜 반영
+    noteSeen(memo);
   }
   updateMemoDates(memo);
   updatePopupTitle(memo);
+}
+
+// 이 창이 거쳐 간 글 모습(글 id + 제목·본문 지문) — 다른 창이 저장한 글이 '이 창의 예전 모습'인지 가린다
+let seenTexts = new Set();
+function noteSeen(m) {
+  if (!m) return;
+  seenTexts.add(m.id + ':' + textHash((m.title || '') + '\u0000' + lf(m.content)));
+  if (seenTexts.size > 1000) seenTexts = new Set([...seenTexts].slice(-500));
+}
+
+// 쓰는 중인 글을 다른 창이 저장한 사본으로 바꾸지 않고 이 창 내용을 지킨다(onExternalStorageChange).
+// 들어온 사본이 이 창이 본 적 없는 내용(다른 기기에서 고친 것 등)이면 그쪽은 충돌본으로 남긴다 — 어느 쪽도 사라지지 않게
+function keepOwnEdits(keep) {
+  const stored = memos.find((m) => m.id === currentId);
+  if (!stored || (lf(stored.content) === keep.content && stored.title === keep.title)) return;
+  if (!seenTexts.has(stored.id + ':' + textHash((stored.title || '') + '\u0000' + lf(stored.content)))) {
+    const copy = conflictCopy(stored);
+    memos.unshift(copy);
+    newConflicts.push(copy.id);
+  }
+  stored.content = keep.content;
+  stored.title = keep.title;
+  stored.highlights = keep.highlights;
+  stored.updatedAt = Math.max(stored.updatedAt || 0, keep.updatedAt || 0);
+  scheduleLocalSave();
 }
 
 // 새 창(글 쓰기 전용)은 창 제목을 글 제목으로 — 작업 표시줄에서 어느 글인지 보이게
@@ -3395,6 +3509,7 @@ function showEditor(memo) {
   emptyState.style.display = 'none';
   titleInput.value = memo.title;
   editor.value = memo.content;
+  noteSeen(memo);
   undoStack = [];
   redoStack = [];
   undoGroupOpen = false;
@@ -3495,6 +3610,7 @@ function loadMemoInEditor(memo, opts = {}) {
 
 // 다른 기기 변경을 받아 와야 하나 — 30초 안에 받았거나, Dropbox 변경 알림을 듣고 있으면(바뀌면 바로 받는다) 아니다
 function needsFreshPull() {
+  if (!syncLeader) return false;   // 주고받는 창이 따로 있다 — 그 창이 받아 기기 저장으로 넘겨준다
   if (Date.now() - lastPullAt < 30000) return false;
   return !(typeof watchIsLive === 'function' && watchIsLive());
 }
@@ -3615,6 +3731,7 @@ function createOfflineCopy(memo) {
 function onEditorInput(e) {
   let memo = memos.find((m) => m.id === currentId);
   if (!memo) return;
+  if (!syncLeader) claimSyncLeader(true);   // 쓰는 창이 Dropbox 와 주고받는다(창을 누를 때 놓쳤어도)
   // 글자가 실제로 안 바뀐 입력 신호(휴대폰 자판이 낱말을 다시 잡을 때 등)에는 '고친 시각'을 찍지 않는다
   if (editor.value === memo.content) return;
   // 오프라인 상태에서 편집 시 복사본 생성
@@ -3639,6 +3756,7 @@ function onEditorInput(e) {
 function onTitleInput() {
   let memo = memos.find((m) => m.id === currentId);
   if (!memo) return;
+  if (!syncLeader) claimSyncLeader(true);
   if (titleInput.value === memo.title) return;
   if (!accessToken && !offlineCopyId) {
     memo = createOfflineCopy(memo);
@@ -3768,7 +3886,7 @@ let syncTimer = null;
 let lastUploadAt = 0;     // 마지막으로 올린 시각
 let pendingSince = 0;     // 아직 못 보낸 변경이 처음 생긴 시각
 function scheduleSyncToDropbox() {
-  if (!accessToken) return;
+  if (!accessToken || !syncLeader) return;   // 다른 창이 주고받는다 — 기기에 저장해 두면 그 창이 올린다
   const now = Date.now();
   if (!pendingSince) pendingSince = now;
   const readyAt = now - pendingSince >= SYNC_MAX_WAIT_MS ? now : now + SYNC_IDLE_MS;
@@ -3793,10 +3911,10 @@ async function runScheduledSync() {
 
 // 지금 바로 올리되, 차례가 왔을 때 보낼 것이 남아 있을 때만 (앞서 줄 선 올리기가 이미 보냈으면 또 보내지 않는다)
 function syncToDropboxIfDirty() {
-  if (!accessToken) return Promise.resolve();
+  if (!accessToken || !syncLeader) return Promise.resolve();
   clearTimeout(syncTimer);
   syncTimer = null;
-  return queueSync(() => (isDirty() ? uploadNow() : undefined)).then(() => settleSyncStatus('저장 완료'));
+  return queueSync(() => (syncLeader && isDirty() ? uploadNow() : undefined)).then(() => settleSyncStatus('저장 완료'));
 }
 
 // 앱을 닫거나 다른 화면으로 넘어갈 때: 현재 내용을 즉시 기기에 저장 + 대기 중인 클라우드 전송을 바로 실행
