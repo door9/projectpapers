@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '164';
+const APP_VERSION = '165';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -534,10 +534,9 @@ async function init() {
   if (newNoteWindow) {
     // Ctrl+N 으로 열린 새 창: 새 글을 만들어 바로 쓰게 한다. 주소는 그 글 주소로 바꿔 둔다(새로고침해도 같은 글)
     if (!accessToken) showApp();
-    const folderId = urlParams.get('folder');
     const id = crypto.randomUUID();
     history.replaceState(null, '', location.pathname + '?memo=' + id + MODE_QUERY);
-    createMemo({ id, folder: folderId && folders.some((f) => f.id === folderId) ? folderId : null });
+    createMemo({ id });
   } else if (openMemoId) {
     const memo = memos.find((m) => m.id === openMemoId);
     if (memo) {
@@ -3077,29 +3076,17 @@ function endFmDrag(commit) {
 }
 
 // ── Memo CRUD ──
-// 새 글이 들어갈 폴더 (cleanupEmptyMemo가 currentId를 비우기 전에 정한다)
-// 1) 특정 폴더를 연 상태면 그 폴더
-// 2) 전체/미분류 보기지만 지금 보고 있는 글이 어떤 폴더에 속하면 그 폴더
-// 3) 둘 다 아니면 폴더 없음
-function newMemoFolder() {
-  let targetFolder = (currentFolder && currentFolder !== '__none__') ? currentFolder : null;
-  if (!targetFolder && currentId) {
-    const cur = memos.find((m) => m.id === currentId);
-    if (cur && cur.folder) targetFolder = cur.folder;
-  }
-  return targetFolder;
-}
-
-// opts(새 창에서만): { id, folder } — 단추·빈 화면에서 부르면 클릭 신호가 들어오므로 무시한다
+// 새 글은 늘 '폴더 없음'에서 시작한다 — 폴더는 쓰는 사람이 폴더 단추로 고른다.
+// (예전엔 목록에서 보던 폴더나 보던 글의 폴더를 따라가, 다시 켜도 기억되는 보던 폴더로 새 글이 저절로 들어갔다 — 2026-10-12)
+// opts(새 창에서만): { id } — 단추·빈 화면에서 부르면 클릭 신호가 들어오므로 무시한다
 function createMemo(opts) {
   const o = opts && !(opts instanceof Event) ? opts : {};
-  const targetFolder = 'folder' in o ? o.folder : newMemoFolder();
   cleanupEmptyMemo();
   const memo = {
     id: o.id || crypto.randomUUID(),
     title: '',
     content: '',
-    folder: targetFolder,
+    folder: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -3113,11 +3100,10 @@ function createMemo(opts) {
   scheduleSyncToDropbox();
 }
 
-// Ctrl+N: 글 쓰기 전용 새 창(목록 더블클릭으로 여는 창과 같은 모양)을 열어 거기서 새 글을 쓴다.
-// 새 글이 들어갈 폴더는 이 창에서 정해 넘긴다(연 폴더 → 보고 있던 글의 폴더). 새 창이 막혔으면 이 창에서
+// Ctrl+N: 글 쓰기 전용 새 창(목록 더블클릭으로 여는 창과 같은 모양)을 열어 거기서 새 글을 쓴다(폴더 없음에서 시작).
+// 새 창이 막혔으면 이 창에서
 function openNewNoteWindow() {
-  const folder = newMemoFolder();
-  const url = location.pathname + '?new=1' + (folder ? '&folder=' + encodeURIComponent(folder) : '') + MODE_QUERY;
+  const url = location.pathname + '?new=1' + MODE_QUERY;
   const w = window.open(url, '_blank', 'width=400,height=700');
   if (!w) createMemo();
 }
@@ -4584,18 +4570,13 @@ function applyTemplate(templateId) {
   const cur = currentId ? memos.find((m) => m.id === currentId) : null;
   const applyToCurrent = !!(cur && !cur.title.trim() && !cur.content.trim());
 
-  // 폴더 결정: 템플릿에 저장된 폴더(존재 시) 우선 → 현재 노트/현재 연 폴더 순
+  // 폴더 결정: 템플릿에 저장해 둔 폴더(있으면) → 빈 글에 적용하면 그 글의 폴더 → 아니면 폴더 없음
+  // (보던 폴더·보던 글의 폴더를 따라가지 않는다 — 새 글과 같은 규칙)
   let targetFolder = null;
   if (tpl.folder && folders.some((f) => f.id === tpl.folder)) {
     targetFolder = tpl.folder;
   } else if (applyToCurrent) {
     targetFolder = cur.folder;
-  } else {
-    targetFolder = (currentFolder && currentFolder !== '__none__') ? currentFolder : null;
-    if (!targetFolder && currentId) {
-      const c = memos.find((m) => m.id === currentId);
-      if (c && c.folder) targetFolder = c.folder;
-    }
   }
 
   let memo;
