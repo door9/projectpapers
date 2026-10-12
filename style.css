@@ -1199,6 +1199,14 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   background: var(--hl-current);
 }
 
+/* 굵게: 위의 입력칸 글자는 그대로 두고, 바로 뒤 겹침층에 같은 글자를 옆으로 살짝 밀어 한 번 더 찍어 획을 두껍게 한다.
+   진짜 굵은 글꼴(font-weight)은 글자 폭이 달라져 커서·선택 자리가 글자와 어긋난다 — 폭은 그대로, 획만 두껍게 */
+#editor-highlight b {
+  font-weight: inherit;
+  color: var(--text);
+  text-shadow: 0.7px 0 0 var(--text);
+}
+
 #editor {
   flex: 1;
   padding: 20px;

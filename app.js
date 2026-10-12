@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '165';
+const APP_VERSION = '166';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -363,6 +363,8 @@ async function init() {
   // 형광펜 단추 — 누를 때 본문의 선택(블록)이 풀리지 않게 포커스를 뺏지 않는다(휴대폰엔 Alt+H 가 없다)
   $('#btn-highlight').addEventListener('pointerdown', (e) => e.preventDefault());
   $('#btn-highlight').addEventListener('click', () => toggleHighlight(true));
+  $('#btn-bold').addEventListener('pointerdown', (e) => e.preventDefault());
+  $('#btn-bold').addEventListener('click', () => toggleBold(true));
   $('#sync-dot').addEventListener('click', () => { if (accessToken && (syncProblem || isDirty())) syncFromDropbox(); });
   // 화면 설정(어두운 화면·글자 크기) — 글 화면의 더보기, 목록 아래 '화면'
   $('#btn-display').addEventListener('click', showDisplaySettings);
@@ -441,6 +443,12 @@ async function init() {
       performRedo();
       return;
     }
+    // Ctrl+B → 굵게 켜기/끄기 (본문 포커스 시). 고른 부분이 없으면 이어서 치는 글자를 굵게/안 굵게
+    if (k === 'b' && !e.shiftKey && !e.altKey && document.activeElement === editor) {
+      e.preventDefault();
+      toggleBold();
+      return;
+    }
     // Ctrl+F → 앱 찾기/바꾸기 (이미 열려 있으면 닫지 않고 찾기 칸으로)
     if (k === 'f') {
       if (!currentId) return;
@@ -508,6 +516,24 @@ async function init() {
   });
 
   editor.addEventListener('input', onEditorInput);
+  // 앱 안 복사·붙여넣기만 서식(형광펜·굵게)을 함께 — 다른 곳에서 가져온 글은 서식 없이
+  editor.addEventListener('copy', onEditorCopy);
+  editor.addEventListener('cut', onEditorCopy);
+  editor.addEventListener('paste', (e) => {
+    const cd = e.clipboardData;
+    const text = lf(cd ? cd.getData('text/plain') : '');
+    pasteInfo = { text, clip: inAppClip(text, cd) };
+  });
+  editor.addEventListener('dragstart', () => {
+    const s = editor.selectionStart, en = editor.selectionEnd;
+    dragClip = s < en ? clipOf(memos.find((m) => m.id === currentId), s, en) : null;
+  });
+  editor.addEventListener('dragend', () => { dragClip = null; });
+  // 고른 부분 없이 Ctrl+B 를 누른 뒤 커서를 다른 데로 옮기면 '이어 치는 글자 굵게'는 끝
+  document.addEventListener('selectionchange', () => {
+    if (!typingBold || document.activeElement !== editor) return;
+    if (editor.selectionStart !== typingBold.at || editor.selectionEnd !== typingBold.at) typingBold = null;
+  });
   editor.addEventListener('scroll', () => {
     $('#editor-highlight').scrollTop = editor.scrollTop;
     handleEditorScroll();
@@ -3419,7 +3445,7 @@ function onExternalStorageChange(e) {
   // 방금 친 글자가 사라졌다(2026-10-11)
   const busyHere = document.hasFocus() && (document.activeElement === editor || document.activeElement === titleInput);
   const keep = mine && (busyHere || localSaveTimer)
-    ? { content: busyHere ? editor.value : lf(mine.content), title: busyHere ? titleInput.value : mine.title, updatedAt: mine.updatedAt, highlights: mine.highlights }
+    ? { content: busyHere ? editor.value : lf(mine.content), title: busyHere ? titleInput.value : mine.title, updatedAt: mine.updatedAt, highlights: mine.highlights, bold: mine.bold }
     : null;
   if (mine) noteSeen(mine);
   loadLocalData();
@@ -3476,6 +3502,7 @@ function keepOwnEdits(keep) {
   stored.content = keep.content;
   stored.title = keep.title;
   stored.highlights = keep.highlights;
+  setRanges(stored, 'bold', keep.bold);
   stored.updatedAt = Math.max(stored.updatedAt || 0, keep.updatedAt || 0);
   scheduleLocalSave();
 }
@@ -3496,6 +3523,7 @@ function showEditor(memo) {
   titleInput.value = memo.title;
   editor.value = memo.content;
   noteSeen(memo);
+  typingBold = null;
   undoStack = [];
   redoStack = [];
   undoGroupOpen = false;
@@ -3702,6 +3730,7 @@ function createOfflineCopy(memo) {
     content: memo.content,
     folder: memo.folder,
     highlights: memo.highlights ? memo.highlights.map((h) => ({ start: h.start, end: h.end })) : undefined,
+    bold: memo.bold ? copyRanges(memo.bold) : undefined,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -3725,11 +3754,14 @@ function onEditorInput(e) {
     memo = createOfflineCopy(memo);
   }
   scheduleUndoSnapshot(memo, e);
-  // 편집으로 글자 위치가 밀리면 형광펜 위치도 함께 보정
-  if (memo.highlights && memo.highlights.length) {
-    memo.highlights = adjustHighlights(memo.content, editor.value, memo.highlights);
-  }
+  // 편집으로 글자 위치가 밀리면 서식(형광펜·굵게) 위치도 함께 보정. 붙여 넣은 글자는 서식 없이 —
+  // 앱 안에서 복사한 글이면 그 서식만 다시 입힌다. 고른 부분 없이 Ctrl+B 를 눌렀으면 이어 치는 글자를 굵게/안 굵게
+  const type = (e && e.inputType) || '';
+  const pasted = type === 'insertFromPaste' || type === 'insertFromDrop' || type === 'insertFromPasteAsQuotation';
+  const d = adjustFormats(memo, memo.content, editor.value, { caret: editor.selectionEnd, plain: pasted });
   memo.content = editor.value;
+  if (pasted) { typingBold = null; applyPastedFormats(memo, type); }
+  else applyTypingBold(memo, d);
   memo.updatedAt = Date.now();
   updateCharCount();
   // 찾기 창이 열려 있으면 바뀐 본문으로 다시 센다(예전 위치를 칠하거나 바꾸지 않게)
@@ -3944,6 +3976,39 @@ function applyViewerMode(on) {
 }
 
 // ── Undo / Redo (어절 단위) ──
+// 한 칸 = 그때의 글자 + 서식(형광펜·굵게). 서식만 바꾼 것(Alt+H·Ctrl+B)도 한 칸이라 되돌리기로 그 서식만 되돌린다
+// (예전엔 글자만 적어, 형광펜을 칠한 뒤 Ctrl+Z 를 누르면 형광펜은 그대로이고 그 전에 쓴 글자가 지워졌다)
+function snapState(memo) {
+  return { c: memo.content, hl: copyRanges(memo.highlights), bd: copyRanges(memo.bold) };
+}
+function sameState(a, b) {
+  return !!a && !!b && a.c === b.c && rangesKey(a.hl) === rangesKey(b.hl) && rangesKey(a.bd) === rangesKey(b.bd);
+}
+function pushUndoState(st) {
+  if (sameState(undoStack[undoStack.length - 1], st)) return;
+  undoStack.push(st);
+  if (undoStack.length > UNDO_MAX) undoStack.shift();
+}
+// 서식만 바꾸거나(형광펜·굵게) 바꾸기 전에 — 지금 상태를 한 칸으로 남기고 묶음을 끊는다
+function checkpointUndo(memo) {
+  pushUndoState(snapState(memo));
+  redoStack = [];
+  undoGroupOpen = false;
+}
+// 되돌리기·되살리기로 한 칸을 그대로 되살린다. 글자가 바뀌면 바뀐 곳으로 커서, 서식만 바뀌면 커서는 그대로
+function applyUndoState(memo, st) {
+  if (st.c !== editor.value) restoreEditorContent(st.c);
+  memo.content = st.c;
+  setRanges(memo, 'highlights', copyRanges(st.hl));
+  setRanges(memo, 'bold', copyRanges(st.bd));
+  memo.updatedAt = Date.now();
+  undoGroupOpen = false;   // 되돌린 뒤 새 입력은 새 묶음으로
+  typingBold = null;
+  updateCharCount();
+  repaintOverlay();
+  scheduleAutoSave();
+}
+
 let undoGroupOpen = false;     // 현재 타이핑 묶음이 열려 있는지
 let undoGroupKind = 'insert';  // 지금 묶음이 쓰기인지 지우기인지
 let undoIdleTimer = null;
@@ -3964,12 +4029,9 @@ function scheduleUndoSnapshot(memo, e) {
   // 쓰다가 지우기로(또는 그 반대로) 넘어가면 새 묶음
   if (undoGroupOpen && (lump || (kind !== undoGroupKind && !composing))) undoGroupOpen = false;
 
-  // 새 어절 묶음의 시작: '입력 전 상태'를 한 번만 저장
+  // 새 어절 묶음의 시작: '입력 전 상태'(글자·서식)를 한 번만 저장
   if (!undoGroupOpen) {
-    if (undoStack.length === 0 || undoStack[undoStack.length - 1] !== before) {
-      undoStack.push(before);
-      if (undoStack.length > UNDO_MAX) undoStack.shift();
-    }
+    pushUndoState(snapState(memo));
     redoStack = []; // 새 입력 시 되살리기 이력 초기화
     undoGroupOpen = true;
     undoGroupKind = kind;
@@ -4020,23 +4082,16 @@ function performUndo() {
   if (!memo) return;
 
   // 현재 상태를 redo 스택에 저장
-  redoStack.push(editor.value);
+  const cur = { ...snapState(memo), c: editor.value };
+  redoStack.push(cur);
 
-  // 현재 내용과 같으면 한 단계 더 뒤로
+  // 현재 상태와 같으면 한 단계 더 뒤로
   let prev = undoStack.pop();
-  if (prev === editor.value && undoStack.length > 0) {
+  if (sameState(prev, cur) && undoStack.length > 0) {
     prev = undoStack.pop();
   }
 
-  const beforeUndo = editor.value;
-  restoreEditorContent(prev); // 본문 교체 + 바뀐 지점으로 커서 이동
-  if (memo.highlights && memo.highlights.length) memo.highlights = adjustHighlights(beforeUndo, prev, memo.highlights);
-  memo.content = prev;
-  memo.updatedAt = Date.now();
-  undoGroupOpen = false; // 되돌린 뒤 새 입력은 새 묶음으로
-  updateCharCount();
-  repaintOverlay();
-  scheduleAutoSave();
+  applyUndoState(memo, prev);
   showToast('되돌리기 완료');
 }
 
@@ -4050,22 +4105,15 @@ function performRedo() {
   if (!memo) return;
 
   // 현재 상태를 undo 스택에 저장
-  undoStack.push(editor.value);
+  const cur = { ...snapState(memo), c: editor.value };
+  undoStack.push(cur);
 
   let next = redoStack.pop();
-  if (next === editor.value && redoStack.length > 0) {
+  if (sameState(next, cur) && redoStack.length > 0) {
     next = redoStack.pop();
   }
 
-  const beforeRedo = editor.value;
-  restoreEditorContent(next); // 본문 교체 + 바뀐 지점으로 커서 이동
-  if (memo.highlights && memo.highlights.length) memo.highlights = adjustHighlights(beforeRedo, next, memo.highlights);
-  memo.content = next;
-  memo.updatedAt = Date.now();
-  undoGroupOpen = false; // 되살린 뒤 새 입력은 새 묶음으로
-  updateCharCount();
-  repaintOverlay();
-  scheduleAutoSave();
+  applyUndoState(memo, next);
   showToast('되살리기 완료');
 }
 
@@ -4117,19 +4165,20 @@ function showHelpDialog() {
           <li><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> 구분선 ------ · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> 구분선 ======</li>
           <li><kbd>Alt</kbd>+<kbd>;</kbd> 날짜 입력 · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>;</kbd> 날짜+시간 입력</li>
           <li><kbd>Alt</kbd>+<kbd>H</kbd> 선택 부분 형광펜(하이라이트) 켜기/끄기</li>
+          <li><kbd>Ctrl</kbd>+<kbd>B</kbd> 선택 부분 굵게 켜기/끄기 — 고르지 않고 누르면 이어서 치는 글자를 굵게(한 번 더 누르면 그만)</li>
           <li><kbd>Esc</kbd> 찾기 창·대화상자 닫기</li>
         </ul>
         <p class="help-h">🗂️ 폴더·정리</p>
         <ul>
           <li>${ico('folder')} 현재 글을 폴더에 지정 — 빈 글도 폴더를 정하면 사라지지 않습니다</li>
           <li><b>폴더 관리</b> — 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'. 순서·이름·옮기기·휴면(메모 달기)·비밀번호·삭제를 한 화면에서. 체크박스로 여러 개를 한꺼번에. 폴더는 3단계까지</li>
-          <li>${ico('more')} 더보기에서 형광펜(${ico('marker')})·되살리기(${ico('redo')})·공유(${ico('share')})·즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
+          <li>${ico('more')} 더보기에서 굵게(${ico('bold')})·형광펜(${ico('marker')})·되살리기(${ico('redo')})·공유(${ico('share')})·즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
           <li>${ico('select')} 선택 모드로 여러 글을 한 번에 이동·삭제</li>
         </ul>
         <p class="help-h">📝 작성·보기</p>
         <ul>
           <li>${ico('template')} 템플릿 저장·불러오기 · ${ico('copy')} 본문만 복사 · ${ico('book')} 읽기 전용 보기</li>
-          <li>형광펜(<kbd>Alt</kbd>+<kbd>H</kbd>, 휴대폰은 더보기의 ${ico('marker')})은 앱 안에서만 보이는 표시예요 — 복사·붙여넣기하면 순수 글자만 오갑니다</li>
+          <li>굵게(<kbd>Ctrl</kbd>+<kbd>B</kbd>)·형광펜(<kbd>Alt</kbd>+<kbd>H</kbd>, 휴대폰은 더보기의 ${ico('bold')}·${ico('marker')})은 앱 안에서만 보이는 서식이에요 — 앱 안에서 복사해 붙이면 함께 따라오고, 다른 곳으로는 순수 글자만 갑니다. 다른 곳에서 복사해 온 글은 서식 없이 들어옵니다. 되돌리기(<kbd>Ctrl</kbd>+<kbd>Z</kbd>)로 서식도 되돌립니다</li>
           <li>글 목록에서 <b>더블클릭</b>하면 새 창으로 열립니다</li>
           <li>${ico('type')} 화면 설정 — 어두운 화면(밝게·어둡게·기기 설정 따름)과 글자 크기(모든 글 공통). 더보기 또는 목록 아래 '화면'</li>
         </ul>
@@ -4261,30 +4310,166 @@ function diffRange(oldStr, newStr) {
   return { p, oldEnd: oldLen - s, newEnd: newLen - s };
 }
 
-// 본문이 old→new로 바뀌었을 때, 형광펜 범위들을 새 좌표로 옮긴다
-function adjustHighlights(oldText, newText, hls) {
-  if (!hls || hls.length === 0) return hls || [];
-  const { p, oldEnd, newEnd } = diffRange(oldText, newText);
-  if (p === oldEnd && p === newEnd) return hls; // 변화 없음
-  const delta = newEnd - oldEnd;
-  const pureInsert = oldEnd === p; // 삭제 없이 삽입만 일어난 경우
+// ── 서식(형광펜·굵게) 범위 공통 ──
+// 둘 다 본문은 순수 텍스트 그대로 두고 '어디에' 만 따로 적는다: 형광펜 memo.highlights, 굵게 memo.bold = [{start,end}, ...]
+const copyRanges = (list) => (list || []).map((r) => ({ start: r.start, end: r.end }));
+const rangesKey = (list) => (list || []).map((r) => r.start + '-' + r.end).join(',');
+// 비었으면 칸을 지운다(서식 없는 글의 파일에 빈 칸이 생기지 않게)
+function setRanges(memo, key, list) {
+  if (list && list.length) memo[key] = list;
+  else delete memo[key];
+}
+// [s,e) 안에 든 부분만, s 를 0 으로 옮겨서 (앱 안에서 복사할 때)
+function sliceRanges(list, s, e) {
   const out = [];
-  for (const h of hls) {
-    const a = h.start, b = h.end;
-    if (b <= p) { out.push({ start: a, end: b }); continue; }                       // 변경 구간보다 앞 → 그대로
-    if (a >= oldEnd) { out.push({ start: a + delta, end: b + delta }); continue; }  // 뒤 → 통째로 이동
-    if (pureInsert) {
-      // 삽입 지점이 형광펜 안쪽 → 삽입된 글자도 형광펜에 포함되게 늘림
-      out.push({ start: a, end: b + delta });
+  for (const r of list || []) {
+    const a = Math.max(r.start, s), b = Math.min(r.end, e);
+    if (b > a) out.push({ start: a - s, end: b - s });
+  }
+  return out;
+}
+
+// 바뀐 구간 { p, oldEnd, newEnd } (옛 [p,oldEnd) → 새 [p,newEnd)). 같은 글자가 이어진 곳에 끼워 넣으면
+// 글자만으론 어디에 넣었는지 갈리지 않는다(앞쪽으로 잡힌다) — caret(입력 뒤 커서)이 있으면 그 자리로 본다
+function editRange(oldText, newText, caret) {
+  const d = diffRange(oldText, newText);
+  if (d.oldEnd === d.p && d.newEnd > d.p && caret != null) {
+    const len = d.newEnd - d.p;
+    const q = caret - len;
+    if (q > d.p && q <= oldText.length && newText.slice(d.p, q) === oldText.slice(d.p, q) &&
+        newText.slice(q + len) === oldText.slice(q)) return { p: q, oldEnd: q, newEnd: q + len };
+  }
+  return d;
+}
+
+// 본문이 바뀐 구간 d 에 맞춰 범위를 옮긴다
+//  · 범위 안에 끼워 넣거나 범위 안을 바꿔 쓰면 새 글자도 그 서식 — 한글 조합(ㅎ→하→한)도 끊기지 않는다
+//    (예전엔 조합 단계마다 그 글자가 범위에서 빠져, 형광펜 안에 한글을 치면 글자마다 빈틈이 생겼다)
+//  · inheritEnd: 범위 바로 뒤에 친 글자도 이어 받는다(굵게 — 워드처럼 굵은 글자 뒤에 이어 치면 굵게)
+//  · plain: 붙여 넣은 글자는 어떤 서식도 받지 않는다(다른 곳에서 가져온 글은 서식 없이)
+function shiftRanges(list, d, { inheritEnd = false, plain = false } = {}) {
+  if (!list || !list.length) return list || [];
+  const { p, oldEnd, newEnd } = d;
+  if (p === oldEnd && p === newEnd) return list;
+  const delta = newEnd - oldEnd;
+  const out = [];
+  const push = (a, b) => { if (b > a) out.push({ start: a, end: b }); };
+  for (const r of list) {
+    const a = r.start, b = r.end;
+    if (oldEnd === p) {                                        // 끼워 넣기만
+      if (b < p || (b === p && (plain || !inheritEnd))) push(a, b);
+      else if (a >= p) push(a + delta, b + delta);
+      else if (plain) { push(a, p); push(newEnd, b + delta); }
+      else push(a, b + delta);
       continue;
     }
-    // 삭제/교체가 형광펜과 겹침 → 손대지 않은 양옆만 남기고 가운데는 해제
-    const leftEnd = Math.min(b, p);
-    if (leftEnd > a) out.push({ start: a, end: leftEnd });
-    const rightStart = Math.max(a, oldEnd);
-    if (b > rightStart) out.push({ start: rightStart + delta, end: b + delta });
+    if (b <= p) { push(a, b); continue; }                      // 바뀐 곳보다 앞 → 그대로
+    if (a >= oldEnd) { push(a + delta, b + delta); continue; } // 뒤 → 통째로 이동
+    if (a <= p && oldEnd <= b) {                               // 바뀐 곳을 감싼다
+      if (plain) { push(a, p); push(newEnd, b + delta); }
+      else push(a, b + delta);
+      continue;
+    }
+    // 걸쳐 있다 → 손대지 않은 양옆만 남긴다
+    if (a < p) push(a, p);
+    if (b > oldEnd) push(oldEnd + delta, b + delta);
   }
   return normalizeHighlights(out);
+}
+
+// 본문이 oldText → newText 로 바뀐 뒤 이 글의 서식(형광펜·굵게)을 맞춘다. 바뀐 구간을 돌려준다
+// (서식이 없는 글은 바뀐 곳을 찾지 않는다 — 긴 글에서 한 글자마다 글 전체를 견주지 않게)
+function adjustFormats(memo, oldText, newText, { caret = null, plain = false } = {}) {
+  if (!(memo.highlights && memo.highlights.length) && !(memo.bold && memo.bold.length) && !typingBold) return null;
+  const d = editRange(oldText, newText, caret);
+  if (memo.highlights && memo.highlights.length) memo.highlights = shiftRanges(memo.highlights, d, { plain });
+  if (memo.bold && memo.bold.length) setRanges(memo, 'bold', shiftRanges(memo.bold, d, { inheritEnd: true, plain }));
+  return d;
+}
+
+// ── 굵게 ──
+// Ctrl+B(또는 더보기의 굵게 단추): 고른 부분 굵게 켜기/끄기(이미 전부 굵으면 풂).
+// 고른 부분 없이 Ctrl+B → 그 자리에서 이어 치는 글자를 굵게(이미 굵게 이어지는 자리면 그만) — 워드처럼
+let typingBold = null;   // { on, start, at } 이어 치는 글자 굵게/안 굵게 — 커서를 다른 데로 옮기면 끝
+function boldAt(memo, p) {   // p 자리에 새로 친 글자가 굵을지(바로 앞 글자를 따른다)
+  return p > 0 && (memo.bold || []).some((r) => r.start <= p - 1 && p - 1 < r.end);
+}
+function toggleBold(fromButton) {
+  if (viewerMode) { if (fromButton) showToast('읽기 전용 보기입니다'); return; }
+  const focused = document.activeElement === editor;
+  if (!focused && !fromButton) return;
+  const memo = memos.find((m) => m.id === currentId);
+  if (!memo) return;
+  const start = editor.selectionStart, end = editor.selectionEnd;
+  if (start === end) {
+    if (fromButton) { showToast('굵게 할 부분을 먼저 선택하세요'); return; }
+    const now = typingBold && typingBold.at === start ? typingBold.on : boldAt(memo, start);
+    typingBold = { on: !now, start, at: start };
+    showToast(typingBold.on ? '이어서 치는 글자를 굵게' : '굵게 그만');
+    return;
+  }
+  checkpointUndo(memo);
+  const cur = memo.bold || [];
+  const off = isRangeFullyHighlighted(cur, start, end);
+  setRanges(memo, 'bold', off ? removeHighlightRange(cur, start, end) : addHighlightRange(cur, start, end));
+  memo.updatedAt = Date.now();
+  typingBold = null;
+  repaintOverlay();
+  saveLocalData();
+  scheduleRenderAndSync();
+  // 고른 블록은 풀고 커서만 굵게 한 부분 끝으로(블록이 덮으면 굵게가 안 보인다). 단추로 했으면 자판을 띄우지 않는다
+  if (focused) editor.focus();
+  editor.setSelectionRange(end, end);
+  if (fromButton) showToast(off ? '굵게를 풀었습니다' : '굵게 했습니다');
+}
+// 고른 부분 없이 Ctrl+B 를 누른 뒤 친 글자 — 그 자리에서 이어 치는 동안만
+function applyTypingBold(memo, d) {
+  if (!typingBold || !d) return;
+  const { p, oldEnd, newEnd } = d;
+  if (p < typingBold.start || p > typingBold.at || oldEnd > typingBold.at) { typingBold = null; return; }
+  if (newEnd > p) {
+    const cur = memo.bold || [];
+    setRanges(memo, 'bold', typingBold.on ? addHighlightRange(cur, p, newEnd) : removeHighlightRange(cur, p, newEnd));
+  }
+  typingBold.at = newEnd;
+}
+
+// ── 앱 안 복사·붙여넣기의 서식 ──
+// 다른 곳으로 복사하면 순수 글자만 간다(입력칸이 그렇다). 앱 안에서 복사한 글을 앱 안에 붙여 넣을 때만 서식이 따라온다:
+// 복사할 때 그 글의 지문과 서식을 기기에 적어 두고, 붙여 넣는 글이 같은 글이면 서식을 다시 입힌다.
+// 다른 프로그램에서 복사한 글(서식 있는 글은 html 도 함께 온다)은 서식 없이 — 둘레 서식도 받지 않는다
+let pasteInfo = null;   // 붙여넣기 신호에서 읽어 둔 것 → 바로 뒤 입력 처리에서 쓴다
+let dragClip = null;    // 본문 안에서 끌어 옮기는 글의 서식
+function clipOf(memo, s, e) {
+  return { text: editor.value.slice(s, e), hl: sliceRanges(memo && memo.highlights, s, e), bd: sliceRanges(memo && memo.bold, s, e) };
+}
+function rememberClip(clip) {
+  if (!clip || !clip.text || (!clip.hl.length && !clip.bd.length)) { store.removeItem('pp_clip'); return; }
+  store.setItem('pp_clip', JSON.stringify({ n: clip.text.length, h: textHash(clip.text), hl: clip.hl, bd: clip.bd }));
+}
+function inAppClip(text, cd) {
+  if (!text) return null;
+  if (cd && cd.types && Array.from(cd.types).includes('text/html')) return null;
+  let c = null;
+  try { c = JSON.parse(store.getItem('pp_clip') || 'null'); } catch { /* 없음 */ }
+  return c && c.n === text.length && c.h === textHash(text) ? c : null;
+}
+function onEditorCopy() {
+  const s = editor.selectionStart, e = editor.selectionEnd;
+  if (s === e) return;
+  rememberClip(clipOf(memos.find((m) => m.id === currentId), s, e));
+}
+// 붙여 넣은(끌어 놓은) 글이 앱 안에서 복사한 글이면 그 서식을 그 자리에 입힌다
+function applyPastedFormats(memo, type) {
+  let info = null;
+  if (type === 'insertFromDrop') info = dragClip ? { text: dragClip.text, clip: dragClip } : null;
+  else { info = pasteInfo; pasteInfo = null; }
+  if (!info || !info.clip) return;
+  const end = editor.selectionEnd, start = end - info.text.length;
+  if (start < 0 || editor.value.slice(start, end) !== info.text) return;
+  const at = (list) => (list || []).map((r) => ({ start: r.start + start, end: r.end + start }));
+  if (info.clip.hl && info.clip.hl.length) memo.highlights = normalizeHighlights([...(memo.highlights || []), ...at(info.clip.hl)]);
+  if (info.clip.bd && info.clip.bd.length) setRanges(memo, 'bold', normalizeHighlights([...(memo.bold || []), ...at(info.clip.bd)]));
 }
 
 // Alt+H(또는 더보기의 형광펜 단추): 선택 영역 형광펜 켜기/끄기 (이미 전부 칠해져 있으면 지움)
@@ -4297,6 +4482,7 @@ function toggleHighlight(fromButton) {
   if (!memo) return;
   const start = editor.selectionStart, end = editor.selectionEnd;
   if (start === end) { showToast('형광펜을 칠할 부분을 먼저 선택하세요'); return; }
+  checkpointUndo(memo);   // 되돌리기 한 번에 이 형광펜만 되돌린다
   const cur = memo.highlights || [];
   const off = isRangeFullyHighlighted(cur, start, end);
   memo.highlights = off ? removeHighlightRange(cur, start, end) : addHighlightRange(cur, start, end);
@@ -4315,7 +4501,7 @@ function searchActive() {
   return searchKeyword !== '' && findMatches.length > 0;
 }
 
-// 오버레이(형광펜 + 찾기 결과)를 현재 상태대로 다시 그린다
+// 오버레이(형광펜 + 굵게 + 찾기 결과)를 현재 상태대로 다시 그린다
 function repaintOverlay() {
   const hl = $('#editor-highlight');
   if (!hl) return;
@@ -4323,6 +4509,7 @@ function repaintOverlay() {
   const userH = (memo && memo.highlights) ? memo.highlights : [];
   const marks = [];
   for (const h of userH) marks.push({ start: h.start, end: h.end, cls: 'user' });
+  for (const b of (memo && memo.bold) || []) marks.push({ start: b.start, end: b.end, cls: 'bold' });
   if (searchActive()) {
     const kl = searchKeyword.length;
     for (const pos of findMatches) {
@@ -4382,7 +4569,7 @@ function paintOverlayLines(hl, text, marks) {
   overlayKeys = keys;
 }
 
-// 겹칠 수 있는 표시들을 우선순위(현재 찾기 > 찾기 > 형광펜)로 합쳐 <mark> HTML 생성
+// 겹칠 수 있는 표시들을 합쳐 HTML 생성 — 바탕색은 우선순위(현재 찾기 > 찾기 > 형광펜)로 하나, 굵게는 따로 겹친다
 function renderMarks(text, marks) {
   const n = text.length;
   const prio = { user: 1, search: 2, 'search-current': 3 };
@@ -4395,14 +4582,16 @@ function renderMarks(text, marks) {
   let out = '';
   for (let i = 0; i < xs.length - 1; i++) {
     const a = xs[i], b = xs[i + 1];
-    let best = null, bestP = 0;
+    let best = null, bestP = 0, bold = false;
     for (const m of marks) {
       if (m.start <= a && m.end >= b) {
+        if (m.cls === 'bold') { bold = true; continue; }
         const pr = prio[m.cls] || 0;
         if (pr > bestP) { bestP = pr; best = m.cls; }
       }
     }
-    const seg = escHtml(text.slice(a, b));
+    let seg = escHtml(text.slice(a, b));
+    if (bold) seg = '<b>' + seg + '</b>';
     out += best ? '<mark class="' + best + '">' + seg + '</mark>' : seg;
   }
   return out;
@@ -4636,13 +4825,9 @@ function replaceAction() {
       return;
     }
   }
-  // 바꾸기도 되돌릴 수 있게 바꾸기 전 본문을 남긴다
-  if (undoStack[undoStack.length - 1] !== oldContent) {
-    undoStack.push(oldContent);
-    if (undoStack.length > UNDO_MAX) undoStack.shift();
-  }
-  redoStack = [];
-  undoGroupOpen = false;
+  // 바꾸기도 되돌릴 수 있게 바꾸기 전 본문(과 서식)을 남긴다
+  const memo0 = memos.find((m) => m.id === currentId);
+  if (memo0) checkpointUndo(memo0);
 
   if (findAllMode) {
     // 모두 찾기 상태 → 전체 바꾸기
@@ -4653,7 +4838,7 @@ function replaceAction() {
     editor.value = editor.value.replace(regex, () => replacement);
     const memo = memos.find((m) => m.id === currentId);
     if (memo) {
-      if (memo.highlights && memo.highlights.length) memo.highlights = adjustHighlights(oldContent, editor.value, memo.highlights);
+      adjustFormats(memo, oldContent, editor.value);
       memo.content = editor.value; memo.updatedAt = Date.now();
     }
     saveLocalData();
@@ -4675,7 +4860,7 @@ function replaceAction() {
     editor.value = before + replacement + after;
     const memo = memos.find((m) => m.id === currentId);
     if (memo) {
-      if (memo.highlights && memo.highlights.length) memo.highlights = adjustHighlights(oldContent, editor.value, memo.highlights);
+      adjustFormats(memo, oldContent, editor.value);
       memo.content = editor.value; memo.updatedAt = Date.now();
     }
     saveLocalData();
@@ -4699,6 +4884,8 @@ function replaceAction() {
 function copyMemoToClipboard() {
   const memo = memos.find((m) => m.id === currentId);
   if (!memo) return;
+  // 클립보드에는 순수 글자만. 앱 안에 붙여 넣으면 서식이 따라오게 서식은 기기에 적어 둔다
+  rememberClip({ text: memo.content || '', hl: copyRanges(memo.highlights), bd: copyRanges(memo.bold) });
   navigator.clipboard.writeText(memo.content || '').then(() => {
     showToast('클립보드에 복사됨');
   }).catch(() => {
