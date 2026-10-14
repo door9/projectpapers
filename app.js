@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '168';
+const APP_VERSION = '169';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -334,6 +334,9 @@ async function init() {
     if (!e.target.closest('#folder-select-wrap')) {
       $('#folder-select-dropdown').style.display = 'none';
     }
+    if (!e.target.closest('#search-filter-wrap')) {
+      $('#search-filter-panel').style.display = 'none';
+    }
   });
 
   $('#btn-login').addEventListener('click', loginDropbox);
@@ -382,7 +385,17 @@ async function init() {
   $('#btn-help').addEventListener('click', showHelpDialog);
   $('#btn-delete').addEventListener('click', confirmDelete);
   $('#memo-sort').addEventListener('change', (e) => { memoSortKey = e.target.value; saveUiPrefs(); renderMemoList(); });
-  $('#search-title-only').addEventListener('change', (e) => { searchTitleOnly = e.target.checked; saveUiPrefs(); renderMemoList(); });
+  // 검색 필터 — 검색칸 옆 단추로 필터 칸을 열고 닫는다(바깥을 누르거나 Esc 로도 닫힘). 필터를 바꿔도 칸은 열어 둔다
+  $('#btn-search-filter').addEventListener('click', () => {
+    const p = $('#search-filter-panel');
+    p.style.display = p.style.display === 'none' ? '' : 'none';
+  });
+  $('#search-title-only').addEventListener('change', (e) => {
+    searchTitleOnly = e.target.checked;
+    updateSearchFilterButton();
+    saveUiPrefs();
+    renderMemoList();
+  });
   $('#btn-select-mode').addEventListener('click', toggleSelectMode);
   $('#btn-bulk-delete').addEventListener('click', bulkDelete);
   $('#btn-bulk-move').addEventListener('click', bulkMoveUnified);
@@ -484,7 +497,7 @@ async function init() {
       return;
     }
     if (fm) return;
-    const dds = [$('#template-dropdown'), $('#folder-select-dropdown')].filter((d) => d.style.display !== 'none');
+    const dds = [$('#template-dropdown'), $('#folder-select-dropdown'), $('#search-filter-panel')].filter((d) => d.style.display !== 'none');
     if (dds.length) { e.preventDefault(); dds.forEach((d) => { d.style.display = 'none'; }); return; }
     if ($('#find-replace-bar').style.display !== 'none') { e.preventDefault(); toggleFindReplace(); editor.focus(); }
   });
@@ -694,6 +707,13 @@ function showDisplaySettings() {
   paint();
 }
 
+// 검색 필터 단추 — 켜진 필터가 있으면 강조(칸을 닫아도 필터가 걸려 있는 줄 알게)
+function updateSearchFilterButton() {
+  const b = $('#btn-search-filter');
+  b.classList.toggle('on', searchTitleOnly);
+  b.title = searchTitleOnly ? '검색 필터 — 제목만' : '검색 필터';
+}
+
 // ── 화면 설정 기억 (정렬·보던 폴더·즐겨찾기 필터·검색 '제목만') ──
 function saveUiPrefs() {
   if (document.body.classList.contains('popup-mode')) return;
@@ -708,6 +728,7 @@ function restoreUiPrefs() {
   $('#btn-fav-filter').classList.toggle('active', favFilterActive);
   searchTitleOnly = !!p.titleOnly;
   $('#search-title-only').checked = searchTitleOnly;
+  updateSearchFilterButton();
   // 폴더가 없어졌거나 잠겨 있으면 '전체'로 (열 때마다 비밀번호를 묻지 않게)
   if (p.folder === '__none__') currentFolder = '__none__';
   else if (p.folder && folders.some((f) => f.id === p.folder) && !isFolderLocked(p.folder)) currentFolder = p.folder;
@@ -4198,7 +4219,7 @@ function showHelpDialog() {
           <li><b>폴더 관리</b> — 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'. 순서·이름·옮기기·휴면(메모 달기)·비밀번호·삭제를 한 화면에서. 체크박스로 여러 개를 한꺼번에. 폴더는 3단계까지</li>
           <li>${ico('more')} 더보기에서 굵게(${ico('bold')})·형광펜(${ico('marker')})·되살리기(${ico('redo')})·공유(${ico('share')})·즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
           <li>${ico('select')} 선택 모드로 여러 글을 한 번에 이동·삭제</li>
-          <li>${ico('search')} 목록 위 검색칸은 글 제목과 본문을 함께 찾습니다 — <b>제목만</b>에 체크하면 제목에서만</li>
+          <li>${ico('search')} 목록 위 검색칸은 글 제목과 본문을 함께 찾습니다 — 옆의 ${ico('filter')} 검색 필터에서 <b>제목만</b>을 켜면 제목에서만(켜져 있으면 단추가 채워진 모양)</li>
         </ul>
         <p class="help-h">📝 작성·보기</p>
         <ul>
