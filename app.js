@@ -45,7 +45,7 @@ const store = {
 const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '167';
+const APP_VERSION = '168';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -93,6 +93,7 @@ let accessToken = store.getItem('dbx_token') || null;
 let refreshToken = store.getItem('dbx_refresh') || null;
 let viewerMode = false;
 let favFilterActive = false;
+let searchTitleOnly = false;   // 목록 검색 '제목만' — 켜면 제목에서만 찾는다(끄면 제목과 본문)
 let selectMode = false;
 let folderListCollapsed = false;
 let selectedMemos = new Set();
@@ -381,6 +382,7 @@ async function init() {
   $('#btn-help').addEventListener('click', showHelpDialog);
   $('#btn-delete').addEventListener('click', confirmDelete);
   $('#memo-sort').addEventListener('change', (e) => { memoSortKey = e.target.value; saveUiPrefs(); renderMemoList(); });
+  $('#search-title-only').addEventListener('change', (e) => { searchTitleOnly = e.target.checked; saveUiPrefs(); renderMemoList(); });
   $('#btn-select-mode').addEventListener('click', toggleSelectMode);
   $('#btn-bulk-delete').addEventListener('click', bulkDelete);
   $('#btn-bulk-move').addEventListener('click', bulkMoveUnified);
@@ -692,10 +694,10 @@ function showDisplaySettings() {
   paint();
 }
 
-// ── 화면 설정 기억 (정렬·보던 폴더·즐겨찾기 필터) ──
+// ── 화면 설정 기억 (정렬·보던 폴더·즐겨찾기 필터·검색 '제목만') ──
 function saveUiPrefs() {
   if (document.body.classList.contains('popup-mode')) return;
-  store.setItem('ui_prefs', JSON.stringify({ sort: memoSortKey, folder: currentFolder, fav: favFilterActive }));
+  store.setItem('ui_prefs', JSON.stringify({ sort: memoSortKey, folder: currentFolder, fav: favFilterActive, titleOnly: searchTitleOnly }));
 }
 function restoreUiPrefs() {
   let p = null;
@@ -704,6 +706,8 @@ function restoreUiPrefs() {
   if (['updatedAt', 'createdAt', 'title'].includes(p.sort)) { memoSortKey = p.sort; $('#memo-sort').value = p.sort; }
   favFilterActive = !!p.fav;
   $('#btn-fav-filter').classList.toggle('active', favFilterActive);
+  searchTitleOnly = !!p.titleOnly;
+  $('#search-title-only').checked = searchTitleOnly;
   // 폴더가 없어졌거나 잠겨 있으면 '전체'로 (열 때마다 비밀번호를 묻지 않게)
   if (p.folder === '__none__') currentFolder = '__none__';
   else if (p.folder && folders.some((f) => f.id === p.folder) && !isFolderLocked(p.folder)) currentFolder = p.folder;
@@ -4194,6 +4198,7 @@ function showHelpDialog() {
           <li><b>폴더 관리</b> — 폴더를 우클릭(휴대폰은 길게 누르기)하거나 폴더 목록 아래 '폴더 관리'. 순서·이름·옮기기·휴면(메모 달기)·비밀번호·삭제를 한 화면에서. 체크박스로 여러 개를 한꺼번에. 폴더는 3단계까지</li>
           <li>${ico('more')} 더보기에서 굵게(${ico('bold')})·형광펜(${ico('marker')})·되살리기(${ico('redo')})·공유(${ico('share')})·즐겨찾기(${ico('star')})·삭제(${ico('trash')})</li>
           <li>${ico('select')} 선택 모드로 여러 글을 한 번에 이동·삭제</li>
+          <li>${ico('search')} 목록 위 검색칸은 글 제목과 본문을 함께 찾습니다 — <b>제목만</b>에 체크하면 제목에서만</li>
         </ul>
         <p class="help-h">📝 작성·보기</p>
         <ul>
@@ -5301,7 +5306,9 @@ function renderMemoList() {
     filtered = filtered.filter((m) => m.favorite);
   }
 
-  const hit = (m) => (m.title || '').toLowerCase().includes(query) || (m.content || '').toLowerCase().includes(query);
+  // '제목만'을 켜면 제목에서만, 끄면 제목과 본문에서 찾는다
+  const hit = (m) => (m.title || '').toLowerCase().includes(query) ||
+    (!searchTitleOnly && (m.content || '').toLowerCase().includes(query));
   if (query) filtered = filtered.filter(hit);
 
   // 정렬
@@ -5337,8 +5344,8 @@ function renderMemoList() {
     const active = m.id === currentId ? 'active' : '';
     const favIcon = m.favorite ? '<span class="memo-item-fav">★</span>' : '';
     const checkbox = selectMode ? '<input type="checkbox" class="memo-item-checkbox" data-check="' + m.id + '"' + (selectedMemos.has(m.id) ? ' checked' : '') + '>' : '';
-    // 검색어가 본문에 있으면 찾은 자리 둘레를 한 줄로
-    const snip = query ? searchSnippet(m, query) : '';
+    // 검색어가 본문에 있으면 찾은 자리 둘레를 한 줄로('제목만'으로 찾을 땐 본문을 보이지 않는다)
+    const snip = query && !searchTitleOnly ? searchSnippet(m, query) : '';
     return `
         <div class="memo-item ${active}${extraCls}" data-id="${m.id}">
           ${checkbox}
@@ -5437,8 +5444,8 @@ function renderMemoList() {
       }
       const open = () => {
         const memo = memos.find((m) => m.id === el.dataset.id);
-        // 검색해서 연 글이면 본문에서 찾은 자리를 보여 준다
-        if (memo) loadMemoInEditor(memo, { query: searchBox.value.trim() });
+        // 검색해서 연 글이면 본문에서 찾은 자리를 보여 준다('제목만'으로 찾았으면 본문 찾기 창을 띄우지 않는다)
+        if (memo) loadMemoInEditor(memo, { query: searchTitleOnly ? '' : searchBox.value.trim() });
         $('#sidebar').classList.remove('open');
       };
       // 손가락으로 누르면 바로 연다 — 0.25초 기다림은 마우스 더블클릭(새 창)과 가르려는 것이라 휴대폰엔 필요 없다
