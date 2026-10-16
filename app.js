@@ -41,7 +41,7 @@ const store = {
 const MODE_QUERY = TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '170';
+const APP_VERSION = '171';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -53,6 +53,152 @@ function onStorageFull(e) {
 
 // 줄바꿈 맞추기 — 입력칸은 \r\n 을 \n 으로 바꿔 돌려준다
 const lf = (s) => String(s || '').replace(/\r\n?/g, '\n');
+
+// ── 글 자료는 IndexedDB 에 (2026-10-16, 판 171) ──
+// 글·폴더·휴지통·영구삭제 기록·템플릿(큰 자료)은 IndexedDB 에 한 묶음(JSON 글자 하나)으로 둔다.
+// localStorage 는 주소(출처)당 약 5MB 안팎이고 같은 주소(door9.github.io)의 다른 앱과 나눠 써서, 글이 늘면 찬다.
+// 작은 값(로그인·동기화 기록·화면 설정·Master 등)은 예전처럼 localStorage — 바로 읽고 쓰고, 창끼리 storage 신호가 간다.
+// 같은 기기의 다른 창에는 IndexedDB 에 다 쓴 뒤 'data_rev' 를 바꿔 알린다(받는 창은 IndexedDB 에서 다시 읽는다).
+// IndexedDB 를 못 쓰면(브라우저가 막음·오류) 예전처럼 localStorage 에 쓴다 — 마지막에 어디에 썼는지는 'bulk_where'.
+// 처음 열 때 localStorage 의 글을 옮겨 오고, 옛 사본은 14일 남겨 두었다가(옛 판으로 되돌릴 때를 대비) 지운다.
+// 그사이 옛 판이 옛 사본을 고쳤으면('legacy_sig' 지문이 다름) 그쪽이 더 새것이라 다시 옮겨 온다.
+const BULK_KEYS = ['memos', 'folders', 'trash', 'deletedIds', 'templates'];
+const IDB_NAME = 'projectpapers';
+const IDB_STORE = 'kv';
+const LEGACY_KEEP_MS = 14 * 86400000;
+const WINDOW_TAG = Math.random().toString(36).slice(2, 8);
+let idb = null;               // 열린 IndexedDB(못 쓰면 null → localStorage)
+let idbWrites = 0;            // 아직 끝나지 않은 쓰기 수
+let idbIdleWaiters = [];
+let dataRevSeq = 0;
+let localLoaded = false;      // 앱을 열며 기기 자료를 다 읽었다 — 그 전에는 쓰지 않는다(빈 상태로 덮어쓰지 않게)
+
+function openIdb() {
+  return new Promise((resolve) => {
+    // 시험(이 컴퓨터)에서 ?idb=0 이면 IndexedDB 없이 — 못 쓰는 브라우저 흉내
+    if (!window.indexedDB || (IS_LOCAL_TEST && PAGE_PARAMS.get('idb') === '0')) { resolve(null); return; }
+    let req;
+    try { req = indexedDB.open(IDB_NAME, 1); } catch (e) { resolve(null); return; }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
+
+// 한 묶음 읽기 → { ok, value(JSON 글자 또는 null) }. 읽다 실패하면 ok:false
+function idbGetBulk() {
+  return new Promise((resolve) => {
+    try {
+      const req = idb.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(store.key('data'));
+      req.onsuccess = () => resolve({ ok: true, value: req.result == null ? null : req.result });
+      req.onerror = () => resolve({ ok: false });
+    } catch (e) { resolve({ ok: false }); }
+  });
+}
+
+// 한 묶음 쓰기. 끝나면 onDone(오류 또는 null). 바로 마무리(commit)해 창을 닫는 순간에 쓴 것도 남게 한다
+function idbPutBulk(json, onDone) {
+  let tx;
+  try {
+    tx = idb.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(json, store.key('data'));
+  } catch (e) { onDone(e); return; }
+  idbWrites++;
+  let done = false;
+  const finish = (err) => {
+    if (done) return;
+    done = true;
+    idbWrites--;
+    onDone(err);
+    if (!idbWrites) { const w = idbIdleWaiters; idbIdleWaiters = []; w.forEach((f) => f()); }
+  };
+  tx.oncomplete = () => finish(null);
+  tx.onabort = () => finish(tx.error || new Error('IndexedDB 쓰기 중단'));
+  try { if (tx.commit) tx.commit(); } catch (e) { /* 이미 끝남 */ }
+}
+
+// 기기 저장(IndexedDB)이 다 끝날 때까지(최대 ms) — 새로고침·로그아웃 전에 마지막 글자를 잃지 않게
+function waitLocalWrites(ms) {
+  if (!idbWrites) return Promise.resolve();
+  return new Promise((resolve) => { idbIdleWaiters.push(resolve); setTimeout(resolve, ms); });
+}
+
+function bulkNow() { return { memos, folders, trash, deletedIds, templates }; }
+
+// localStorage 에 있는 옛 방식 자료(없으면 null)
+function legacyBulk() {
+  let any = false;
+  const out = {};
+  for (const k of BULK_KEYS) {
+    const v = store.getItem(k);
+    if (v == null) continue;
+    any = true;
+    try { out[k] = JSON.parse(v); } catch { /* 깨진 값은 건너뜀 */ }
+  }
+  return any ? out : null;
+}
+
+function writeLegacyBulk() {
+  const b = bulkNow();
+  for (const k of BULK_KEYS) store.setItem(k, JSON.stringify(b[k]));
+  store.setItem('bulk_where', 'ls');
+  store.setItem('legacy_sig', String(textHash(store.getItem('memos') || '')));
+}
+
+// 큰 자료 쓰기(saveLocalData 에서). 다 쓰면 같은 기기의 다른 창에 알린다
+function writeBulk() {
+  if (!localLoaded) { console.warn('기기 자료를 읽기 전이라 저장하지 않음'); return; }
+  if (!idb) { writeLegacyBulk(); return; }
+  idbPutBulk(JSON.stringify(bulkNow()), (err) => {
+    if (!err) {
+      store.setItem('bulk_where', 'idb');
+      store.setItem('data_rev', WINDOW_TAG + ':' + (++dataRevSeq) + ':' + Date.now());
+      return;
+    }
+    // 공간이 모자라면 알리기만 한다(글은 화면·메모리에 있고 Dropbox 로는 계속 보낸다).
+    // 그 밖의 오류면 이번 화면은 localStorage 로 바꿔 쓴다 — 다음에 열 때 'bulk_where' 를 보고 다시 옮겨 온다
+    if (err.name === 'QuotaExceededError') { onStorageFull(err); return; }
+    console.error('IndexedDB 쓰기 실패 — 이 화면은 localStorage 로 씁니다:', err);
+    idb = null;
+    writeLegacyBulk();
+  });
+}
+
+// 앱을 열 때: 어디서 읽을지 정하고(필요하면 localStorage → IndexedDB 로 옮기고) 읽은 묶음을 돌려준다
+async function openLocalData() {
+  idb = await openIdb();
+  const legacy = legacyBulk();
+  if (!idb) return legacy;                          // IndexedDB 를 못 쓴다 — 예전처럼
+  let got = await idbGetBulk();
+  if (!got.ok) { await new Promise((r) => setTimeout(r, 300)); got = await idbGetBulk(); }   // 잠깐의 오류면 한 번 더
+  if (!got.ok) { idb = null; return legacy; }       // 읽을 수 없다 — 이번 화면은 localStorage 로(IndexedDB 의 것을 덮어쓰지 않게)
+  const legacyRaw = store.getItem('memos');
+  const legacyChanged = legacyRaw != null && String(textHash(legacyRaw)) !== store.getItem('legacy_sig');
+  if (legacy && (got.value == null || store.getItem('bulk_where') === 'ls' || legacyChanged)) {
+    // 처음 옮기기 · 지난번에 localStorage 로 썼음 · 옛 판이 옛 사본을 고쳤음 → localStorage 쪽이 새것. IndexedDB 로 옮긴다
+    const ok = await new Promise((resolve) => idbPutBulk(JSON.stringify({
+      memos: legacy.memos || [], folders: legacy.folders || [], trash: legacy.trash || [],
+      deletedIds: legacy.deletedIds || [], templates: legacy.templates || [],
+    }), (err) => resolve(!err)));
+    if (ok) {
+      store.setItem('bulk_where', 'idb');
+      store.setItem('legacy_sig', String(textHash(legacyRaw || '')));
+      if (!store.getItem('idb_migrated_at')) store.setItem('idb_migrated_at', String(Date.now()));
+    } else idb = null;
+    return legacy;
+  }
+  // 옮긴 지 14일이 지났고 IndexedDB 가 맞는 쪽이면 옛 localStorage 사본을 지운다
+  const at = Number(store.getItem('idb_migrated_at')) || 0;
+  if (legacy && got.value != null && at && Date.now() - at > LEGACY_KEEP_MS && store.getItem('bulk_where') === 'idb') {
+    for (const k of BULK_KEYS) store.removeItem(k);
+    store.removeItem('legacy_sig');
+  }
+  if (got.value == null) return null;
+  try { return JSON.parse(got.value); } catch (e) { console.error('기기 저장 자료가 깨짐:', e); return legacy; }
+}
 
 // ── Config ──
 const DROPBOX_CLIENT_ID = '0kfnwj8hluxzpun';
@@ -231,7 +377,8 @@ async function init() {
   applyFont();
 
   await handleOAuthCallback();
-  loadLocalData();
+  assignLocalData(await openLocalData());   // IndexedDB 에서(처음이면 localStorage 에서 옮겨 와서)
+  localLoaded = true;
   cleanupEmptyMemo();
 
   // Cloudflare 잠금에 다시 로그인하고 돌아온 주소(?login=1)는 지운다
@@ -857,7 +1004,7 @@ function logout() {
   refreshToken = null;
   store.removeItem('dbx_token');
   store.removeItem('dbx_refresh');
-  location.reload();
+  waitLocalWrites(2000).then(() => location.reload());   // 기기 저장이 끝난 뒤(최대 2초)
 }
 
 // Dropbox 로그인이 끝났다(갱신 토큰도 거절됨) — 새로고침 뒤 로그인 화면에서 까닭을 보여 준다
@@ -1866,11 +2013,7 @@ function saveLocalData(changed = true) {
   clearTimeout(localSaveTimer);
   localSaveTimer = null;
   if (currentId) noteSeen(memos.find((m) => m.id === currentId));   // 이 창이 저장한 모습 — 다른 창이 되돌려 저장해도 알아본다
-  store.setItem('memos', JSON.stringify(memos));
-  store.setItem('folders', JSON.stringify(folders));
-  store.setItem('trash', JSON.stringify(trash));
-  store.setItem('deletedIds', JSON.stringify(deletedIds));
-  store.setItem('templates', JSON.stringify(templates));
+  writeBulk();   // 글·폴더·휴지통·영구삭제 기록·템플릿 — IndexedDB(못 쓰면 localStorage). 다 쓰면 다른 창에 'data_rev' 로 알린다
   if (masterPasswordHash) store.setItem('master_pw', masterPasswordHash);
   else store.removeItem('master_pw');
   store.setItem('master_pw_at', String(masterPasswordAt || 0));
@@ -1879,18 +2022,16 @@ function saveLocalData(changed = true) {
   updateSaveSyncTimes();
 }
 
-function loadLocalData() {
+// 읽어 온 큰 자료 묶음(b — IndexedDB 또는 localStorage 에서)을 화면 상태로. 없는 항목은 그대로 둔다(예전 loadLocalData 와 같게)
+function assignLocalData(b) {
   try {
-    const md = store.getItem('memos');
-    if (md) memos = JSON.parse(md);
-    const fd = store.getItem('folders');
-    if (fd) folders = JSON.parse(fd);
-    const td = store.getItem('trash');
-    if (td) trash = JSON.parse(td);
-    const dd = store.getItem('deletedIds');
-    if (dd) deletedIds = JSON.parse(dd);
-    const tp = store.getItem('templates');
-    if (tp) templates = JSON.parse(tp);
+    if (b) {
+      if (Array.isArray(b.memos)) memos = b.memos;
+      if (Array.isArray(b.folders)) folders = b.folders;
+      if (Array.isArray(b.trash)) trash = b.trash;
+      if (Array.isArray(b.deletedIds)) deletedIds = b.deletedIds;
+      if (Array.isArray(b.templates)) templates = b.templates;
+    }
     masterPasswordHash = store.getItem('master_pw') || null;
     masterPasswordAt = Number(store.getItem('master_pw_at')) || 0;
     // 마이그레이션: sortOrder 없는 폴더에 순번 부여
@@ -3469,7 +3610,36 @@ function onExternalStorageChange(e) {
   // 다른 창(새 창 등)에서 바꾼 화면 설정도 바로
   if (key === THEME_KEY) { applyTheme(); return; }
   if (key === FONT_KEY) { applyFont(); return; }
-  if (key !== 'memos') return; // saveLocalData는 항상 memos를 함께 저장하므로 이 키만 보면 됨
+  // 다른 창이 글 자료를 IndexedDB 에 다 썼다 — 다시 읽어 반영한다
+  if (key === 'data_rev') { onExternalDataChange(); return; }
+  // 옛 방식(localStorage)의 글 저장 신호. 지우는 신호(옛 사본 정리)는 무시한다
+  if (key !== 'memos' || e.newValue == null) return;
+  // 이 화면이 localStorage 로 쓰는 중이면 예전과 같다. IndexedDB 를 쓰는 화면이면 옛 판 창(또는 IndexedDB 를 못 쓰게 된 창)이
+  // 쓴 것 — 받아들이고 IndexedDB 에도 써 둔다('못 보낸 변경' 표시는 쓴 창이 이미 세웠다)
+  applyExternalData(legacyBulk());
+  if (idb) {
+    saveLocalData(false);
+    store.setItem('legacy_sig', String(textHash(e.newValue)));
+  }
+}
+
+// 다른 창이 IndexedDB 에 쓴 것을 읽어 반영한다. 읽는 사이 또 알림이 오면 한 번 더 읽는다(마지막 것까지)
+let extReading = null;
+let extAgain = false;
+function onExternalDataChange() {
+  if (!idb) return;
+  if (extReading) { extAgain = true; return; }
+  extReading = (async () => {
+    do {
+      extAgain = false;
+      const got = await idbGetBulk();
+      if (got.ok && got.value != null) applyExternalData(JSON.parse(got.value));
+    } while (extAgain);
+  })().catch((err) => console.error('다른 창 자료 읽기 실패:', err)).finally(() => { extReading = null; });
+}
+
+// 같은 기기의 다른 창이 저장한 자료(bulk)로 이 창을 맞춘다
+function applyExternalData(bulk) {
   // 이 창에 열린 빈 새 글(아직 아무것도 안 씀)은 다른 창이 '빈 글 정리'로 지워도 이 창에선 남긴다 —
   // Ctrl+N 새 창에서 쓰기 시작하기 전에 목록 창이 정리해 버리면 새 창의 글이 닫혔다
   const mine = currentId && memos.find((m) => m.id === currentId);
@@ -3481,7 +3651,7 @@ function onExternalStorageChange(e) {
     ? { content: busyHere ? editor.value : lf(mine.content), title: busyHere ? titleInput.value : mine.title, updatedAt: mine.updatedAt, highlights: mine.highlights, bold: mine.bold }
     : null;
   if (mine) noteSeen(mine);
-  loadLocalData();
+  assignLocalData(bulk);
   if (mine && isBlankMemo(mine) && !memos.some((m) => m.id === mine.id) && !trash.some((t) => t.data && t.data.id === mine.id)) {
     memos.unshift(mine);
   }
@@ -5609,7 +5779,8 @@ if ('serviceWorker' in navigator) {
     if (localSaveTimer) saveLocalData();
     saveEditorPos();   // 다시 열면 쓰던 자리(커서·스크롤)로
     if (currentId) sessionStorage.setItem('reopen_memo', currentId);
-    location.reload();
+    // 기기 저장(IndexedDB)이 끝난 뒤 다시 연다 — 쓰는 도중에 다시 열면 마지막 글자를 잃을 수 있다(최대 2초 기다림)
+    waitLocalWrites(2000).then(() => location.reload());
   });
 }
 
