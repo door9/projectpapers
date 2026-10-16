@@ -1,25 +1,21 @@
 // ── 저장 칸·Dropbox 위치·동기화 방식 ──
-// ?pilot        시범 운전 칸: 진짜 메모와 따로 돌린다
-//               (기기 저장은 'pilot:' 칸, Dropbox 는 /projectpapers-pilot. 로그인만 함께 쓴다)
 // ?ns=이름&split=1  시험용 — 이 컴퓨터(localhost)에서만. 한 브라우저 안에서 여러 기기를 흉내 낸다(split 없으면 옛 한 파일 방식)
 const PAGE_PARAMS = new URLSearchParams(location.search);
 const IS_LOCAL_TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
-const PILOT = PAGE_PARAMS.has('pilot');
 const TEST_NS = IS_LOCAL_TEST ? PAGE_PARAMS.get('ns') : null;
-const STORE_NS = PILOT ? 'pilot:' : TEST_NS ? TEST_NS + ':' : '';
+const STORE_NS = TEST_NS ? TEST_NS + ':' : '';
 // Dropbox 안 데이터 위치. 2026-10-06 주소를 /projectpapers/ 로 바꾸며 폴더 이름도 바꿨다.
-// 옛 폴더(OLD_DBX_ROOT)는 새 앱이 처음 동기화할 때 서버 안에서 복사해 오고 '옮겨 감' 표시를 단다(sync-split.js adoptOldRoot)
-const DBX_ROOT = PILOT ? '/projectpapers-pilot' : '/projectpapers';
-const OLD_DBX_ROOT = PILOT ? '/project-papers-pilot' : '/project-papers';
+// (옛 /project-papers 에서 옮겨 오기는 모든 기기가 마쳐 2026-10-16 코드를 걷어 냈다.) 바꾸면 이미 쓴 글을 찾지 못한다
+const DBX_ROOT = '/projectpapers';
 // 글 단위 동기화(sync-split.js) — 2026-10-04 전환. 옛 한 파일 방식은 옮겨 올 때와 시험에서만 쓴다
 const SPLIT_SYNC = TEST_NS != null ? PAGE_PARAMS.get('split') === '1' : true;
 // 로그인과 화면 설정(어두운 화면·글자 크기)은 칸과 상관없이 하나 — 화면 설정은 index.html 머리에서 그리기 전에도 읽는다
 const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh', 'memo_theme', 'memo_font']);
 // Dropbox 위치에 딸린 동기화 기록(받은 커서·파일 버전·기준점·못 보낸 변경)은 위치 이름을 붙여 따로 둔다.
-// 옛 주소의 앱도 같은 기기 저장소(door9.github.io)를 쓰므로, 옛 앱이 옛 폴더 기록을 써도 섞이지 않게.
+// 같은 주소의 기기 저장소를 함께 쓰는 다른 판이 다른 위치를 쓰더라도 기록이 섞이지 않게.
 // 새 위치에서는 기록이 비어 있어 처음 맞추기(받아서 합치고 다른 것만 올리기)부터 한다. 글·폴더 자체는 함께 쓴다
 const ROOT_KEYS = new Set(['split_revs', 'split_base', 'split_cursor', 'split_ready', 'split_frozen', 'split_frozen_at',
-  'root_adopted', 'dbx_rev', 'sync_base', 'last_synced_at', 'pending_sync']);
+  'dbx_rev', 'sync_base', 'last_synced_at', 'pending_sync']);
 const ROOT_TAG = DBX_ROOT.slice(1) + '/';
 const store = {
   key: (k) => (SHARED_KEYS.has(k) ? k : STORE_NS + (ROOT_KEYS.has(k) ? ROOT_TAG : '') + k),
@@ -41,11 +37,11 @@ const store = {
     return ROOT_KEYS.has(k) || k.includes('/') ? null : k;
   },
 };
-// 시범·시험 창에서 새 창을 열 때도 같은 칸을 쓰게 주소 꼬리를 이어 붙인다
-const MODE_QUERY = PILOT ? '&pilot' : TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
+// 시험 창에서 새 창을 열 때도 같은 칸을 쓰게 주소 꼬리를 이어 붙인다
+const MODE_QUERY = TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '169';
+const APP_VERSION = '170';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -243,14 +239,6 @@ async function init() {
     const p = new URLSearchParams(location.search);
     p.delete('login');
     history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p : '') + location.hash);
-  }
-
-  // 옛 주소(/project-papers/)의 안내 페이지에서 넘어왔다 = 설치해 둔 앱이 아직 옛 주소를 가리킨다
-  if (PAGE_PARAMS.get('moved') === '1') {
-    const p = new URLSearchParams(location.search);
-    p.delete('moved');
-    history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p : '') + location.hash);
-    setTimeout(() => showToast('주소가 바뀌었습니다. 설치한 앱은 지우고 이 주소에서 다시 설치해 주세요'), 1000);
   }
 
   // URL 파라미터로 특정 메모 열기 (새 창) / ?new=1 이면 새 창에서 새 글 쓰기(Ctrl+N)
@@ -669,7 +657,7 @@ function showDisplaySettings() {
         <button type="button" class="disp-step big" data-step="1" title="크게" aria-label="글자 크게">가</button>
       </div>
       <div class="disp-preview">오늘 회의에서 논의한 내용을 정리하면 다음과 같다.
-취재원과 통화했고 기사 방향을 다시 잡았다.</div>
+담당자와 통화했고 일정 방향을 다시 잡았다.</div>
       <div class="disp-foot"><button type="button" class="trash-link" data-disp="reset">기본 크기로</button></div>
     </div>`;
   const range = o.querySelector('input[type="range"]');
@@ -2460,7 +2448,7 @@ function showMoveFoldersDialog(ids, onDone) {
 
 // ── 휴면 ──
 // 휴면은 최상위 폴더에 건다. 그 아래 폴더·글은 모두 따라서 '전체'에서 숨는다.
-// 휴면 메모(dormantNote) = '어느 부서·팀, 언제' 같은 한 줄. 같은 메모를 단 폴더끼리 휴면 칸에서 한 묶음으로 보인다.
+// 휴면 메모(dormantNote) = '어느 모임·일, 언제' 같은 한 줄. 같은 메모를 단 폴더끼리 휴면 칸에서 한 묶음으로 보인다.
 function setFoldersDormant(ids, on, note = '') {
   const now = Date.now();
   note = (note || '').trim();
@@ -2528,7 +2516,7 @@ function showDormantDialog(ids, { mode = 'sleep', note = '', onDone } = {}) {
       <p>${title}</p>
       ${info ? `<p style="font-size:0.85rem;color:var(--text2);margin-top:-8px">${info}</p>` : ''}
       <input type="text" id="dn-input" list="dn-list" maxlength="80" autocomplete="off"
-        placeholder="휴면 메모 (예: 사회부 기동팀, 2024.10–2025.10)" value="${escapeHtml(note)}">
+        placeholder="휴면 메모 (예: 독서 모임, 2024.10–2025.10)" value="${escapeHtml(note)}">
       <datalist id="dn-list">${notes.map((n) => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
       <div>
         <button class="btn btn-secondary" id="dn-cancel">취소</button>
@@ -5531,16 +5519,6 @@ function setRecentScrollTop(top) {
 
 // ── UI Helpers ──
 function showApp() {
-  // 시범 운전 표시 — 진짜 메모와 헷갈리지 않게
-  if (PILOT && !$('#pilot-badge')) {
-    const b = document.createElement('span');
-    b.id = 'pilot-badge';
-    b.textContent = '시범 운전';
-    b.title = '새 동기화 방식 시험 중 — 진짜 메모와 따로 저장됩니다';
-    const h1 = $('#sidebar-header h1');
-    h1.insertBefore(b, h1.querySelector('span'));
-    document.title = 'Project Papers (시범 운전)';
-  }
   loginScreen.style.display = 'none';
   app.style.display = 'flex';
   renderAll();
@@ -5595,7 +5573,7 @@ function formatCreatedAt(ts) {
 }
 
 // 화면에 넣을 글자 — 속성(value="…" 등)에 넣어도 깨지지 않게 따옴표까지 바꾼다
-// (예전엔 따옴표를 그대로 둬, '특집 "A" 기획' 폴더 이름이 이름 바꾸기 칸에 '특집'으로 잘려 나왔다)
+// (예전엔 따옴표를 그대로 둬, '모임 "A" 준비' 폴더 이름이 이름 바꾸기 칸에 '모임'으로 잘려 나왔다)
 function escapeHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');

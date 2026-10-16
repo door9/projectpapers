@@ -1,4 +1,4 @@
-const CACHE_NAME = 'memo-v169';
+const CACHE_NAME = 'memo-v170';
 // 경로는 이 파일(sw.js) 자리 기준 — door9.github.io/projectpapers/ 에서도, 주소 맨 앞(/)에 둔 Cloudflare 에서도 같이 쓴다
 const ASSETS = [
   './',
@@ -35,7 +35,7 @@ self.addEventListener('install', (e) => {
   self.skipWaiting();
 });
 
-// 옛 캐시 정리는 **메모앱 것(memo-*)만**. door9.github.io 주소를 PROJ210 등 다른 앱과 함께 쓰므로,
+// 옛 캐시 정리는 **메모앱 것(memo-*)만**. door9.github.io 주소를 다른 앱과 함께 쓰므로,
 // 이름으로 가리지 않고 지우면 서로의 오프라인 사본을 지운다(PC에서 오프라인 실행이 안 되던 원인).
 self.addEventListener('activate', (e) => {
   e.waitUntil(
