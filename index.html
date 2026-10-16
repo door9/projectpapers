@@ -22,6 +22,9 @@
       if ((localStorage.getItem('dbx_token') || /[?&]code=/.test(qs)) && !/[?&](memo|new)=/.test(qs)) {
         document.documentElement.classList.add('booting');
         setTimeout(function () { document.documentElement.classList.remove('booting'); }, 15000);
+        // 로딩 중 새 판으로 다시 열린 것이면 게이지를 앞 화면이 채우던 데서 잇는다(로딩이 한 번으로 보이게)
+        var carry = JSON.parse(sessionStorage.getItem('boot_carry') || 'null');
+        if (carry && Date.now() - carry.at < 20000) document.documentElement.style.setProperty('--boot-carry', Math.min(Number(carry.pct) || 0, 90) + '%');
       }
       var t = localStorage.getItem('memo_theme');
       var dark = t === 'dark' || (t === 'system' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);

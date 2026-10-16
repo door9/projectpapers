@@ -41,7 +41,7 @@ const store = {
 const MODE_QUERY = TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '172';
+const APP_VERSION = '173';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -3968,17 +3968,21 @@ function bootPaint() {
 }
 
 async function runBootGate(kind) {
-  if (!accessToken || bootOn) return;
+  if (!accessToken || bootOn || !$('#boot')) return;   // (#boot 이 없는 옛 index.html 과 섞여 열렸으면 덮지 않는다)
   const run = ++bootRun;
   const el = $('#boot');
   const veil = kind === 'resume';
   bootOn = true;
   bootPct = 0; bootGoal = 0; bootFirst = false; bootFinal = false;
+  // 새 판으로 다시 열린 것이면 앞 화면이 채우던 게이지에서 잇는다
+  let carry = null;
+  try { carry = JSON.parse(sessionStorage.getItem('boot_carry') || 'null'); sessionStorage.removeItem('boot_carry'); } catch (e) { /* 없음 */ }
+  if (carry && Date.now() - carry.at < 20000) bootPct = Math.min(Number(carry.pct) || 0, 90);
   el.classList.remove('closing');
-  el.classList.toggle('veil', veil);
+  el.classList.toggle('veil', veil && !carry);
   el.classList.add('on');
   document.documentElement.classList.remove('booting');   // 머리 스크립트가 첫 그림에 띄운 것 — 이제 여기서 맡는다
-  $('#boot-fill').style.width = '0%';
+  $('#boot-fill').style.width = bootPct.toFixed(1) + '%';
   $('#boot-skip').hidden = true;
   // 고치던 칸에서 손을 뗀다(휴대폰 자판도 내려간다) — 받기가 끝나면 최신 내용에서 다시
   if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
@@ -4005,11 +4009,26 @@ async function runBootGate(kind) {
       if (Date.now() - t0 > 3000) { clearInterval(iv); res('other'); }
     }, 100);
   });
-  const outcome = !navigator.onLine ? 'offline'
+  let outcome = !navigator.onLine ? 'offline'
     : await Promise.race([pullFresh().then(() => 'done', () => 'fail'), skipped, notLeader]);
   clearTimeout(veilTimer);
-  clearTimeout(skipTimer);
   if (run !== bootRun) return;
+  // 서버에 이 화면과 다른 판이 올라가 있으면 곧 새 판이 깔려 다시 열린다 — 걷지 않고 그대로 이어서 기다린다
+  // (걷었다가 다시 열리면 로딩이 두 번 뜬다). 다시 열린 화면은 게이지를 이어서 채운다. 끝내 안 열리면 10초 뒤(또는 단추로) 연다
+  if (outcome !== 'skip' && outcome !== 'offline' && await updateComing(1500)) {
+    if (run !== bootRun) return;
+    unveil();
+    bootStage('새 판으로 여는 중…', 90, true);
+    // 새 판 확인이 한 번 빗나갔을 수도 있어(서버가 막 바뀐 때 등) 기다리는 동안 두 번 더 묻는다
+    const retry = [2000, 5000].map((ms) => setTimeout(() => {
+      if (run === bootRun && bootOn) navigator.serviceWorker.getRegistration().then((reg) => reg && reg.update()).catch(() => {});
+    }, ms));
+    const r = await Promise.race([skipped, dbxSleep(10000)]);
+    retry.forEach(clearTimeout);
+    if (run !== bootRun) return;
+    if (r === 'skip') outcome = 'done';
+  }
+  clearTimeout(skipTimer);
   if (outcome === 'offline' || outcome === 'fail') {
     unveil();
     bootStage(outcome === 'offline' ? '오프라인 · 이 기기 자료로 엽니다' : '연결하지 못했습니다 · 이 기기 자료로 엽니다', 100, true);
@@ -5974,9 +5993,33 @@ function escapeHtml(s) {
 // 로그인이 만료되면 앱은 기기에 저장해 둔 사본으로 열리지만 새 버전을 못 받는다 — 알리고 다시 로그인하게 한다.
 // 잠금이 없는 곳(GitHub Pages)에서는 sw.js 가 그대로 받아지므로 아무 일도 없다
 let loginAsked = false;
+// 서버의 sw.js 를 직접 받아 본다(서비스워커를 거치지 않는다) — 잠금 로그인이 만료됐는지, 서버에 올라간 판이 몇 판인지
+let serverProbe = null;   // Promise<{ expired, version }> — 켤 때·돌아올 때 새로
 function loginExpired() {
-  if (!navigator.onLine) return Promise.resolve(false);   // 통신이 안 되면 묻지 않는다(콘솔에 오류만 남는다)
-  return fetch('sw.js', { cache: 'no-store', redirect: 'manual' }).then((res) => res.type === 'opaqueredirect').catch(() => false);
+  // 통신이 안 되면 묻지 않는다(콘솔에 오류만 남는다)
+  serverProbe = !navigator.onLine ? Promise.resolve({ expired: false, version: null })
+    : fetch('sw.js', { cache: 'no-store', redirect: 'manual' }).then(async (res) => {
+      if (res.type === 'opaqueredirect') return { expired: true, version: null };
+      const m = res.ok ? (await res.text()).match(/const CACHE_NAME = '([^']+)'/) : null;
+      return { expired: false, version: m ? m[1] : null };
+    }).catch(() => ({ expired: false, version: null }));
+  return serverProbe.then((s) => s.expired);
+}
+const MY_CACHE_NAME = 'memo-v' + APP_VERSION;   // 이 화면 코드의 판(sw.js 의 CACHE_NAME 과 같은 꼴)
+// 서버에 이 화면과 다른 판이 올라가 있다 — 곧 새 판이 깔려 다시 열린다(controllerchange). 길어도 ms 까지만 기다린다
+function updateComing(ms) {
+  if (!serverProbe || !('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return Promise.resolve(false);
+  return Promise.race([serverProbe.then((s) => !!s.version && s.version !== MY_CACHE_NAME), dbxSleep(ms).then(() => false)]);
+}
+// 서비스워커에게 판 번호를 묻는다(옛 판 서비스워커는 답하지 않는다 → null)
+function swVersionOf(worker) {
+  return new Promise((resolve) => {
+    if (!worker) { resolve(null); return; }
+    const ch = new MessageChannel();
+    const t = setTimeout(() => resolve(null), 1500);
+    ch.port1.onmessage = (e) => { clearTimeout(t); resolve(e.data); };
+    try { worker.postMessage('version', [ch.port2]); } catch (e) { clearTimeout(t); resolve(null); }
+  });
 }
 async function checkLogin() {
   if (!(await loginExpired())) return false;
@@ -5994,9 +6037,19 @@ if ('serviceWorker' in navigator) {
   checkLogin();
   // 새 버전이 깔리면 쓰던 글을 기기에 저장하고 새 코드로 다시 연다.
   // 휴대폰은 앱을 닫지 않고 오래 띄워 두므로, 배포 뒤에도 옛 코드가 바뀐 동기화 규칙을 모른 채 계속 저장을 올린다
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!hadController || reloadingForUpdate) return;   // 처음 설치될 때는 다시 열 필요 없음
+  // 단, 이 화면이 이미 그 판이면 다시 열지 않는다 — 앱은 켤 때 서버에서 새 파일을 받아 열므로, 새 판이 나온 뒤 처음 켜면
+  // 화면은 벌써 새 판인데 서비스워커 설치는 몇 초 뒤에 끝난다. 예전엔 그때 또 다시 열어 로딩 화면이 두 번 떴다(2026-10-17)
+  let swChanging = false;
+  navigator.serviceWorker.addEventListener('controllerchange', async () => {
+    if (!hadController || reloadingForUpdate || swChanging) return;   // 처음 설치될 때는 다시 열 필요 없음
+    swChanging = true;
+    let v = await swVersionOf(navigator.serviceWorker.controller);
+    if (v == null && serverProbe) v = (await serverProbe).version;
+    swChanging = false;
+    if (v === MY_CACHE_NAME) return;
     reloadingForUpdate = true;
+    // 로딩 화면이 떠 있으면 다시 연 화면이 게이지를 이어서 채운다(로딩이 한 번으로 보이게)
+    if (bootOn) { try { sessionStorage.setItem('boot_carry', JSON.stringify({ pct: Math.round(bootPct), at: Date.now() })); } catch (e) { /* 없으면 처음부터 */ } }
     if (localSaveTimer) saveLocalData();
     saveEditorPos();   // 다시 열면 쓰던 자리(커서·스크롤)로
     if (currentId) sessionStorage.setItem('reopen_memo', currentId);

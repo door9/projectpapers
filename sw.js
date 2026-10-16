@@ -1,4 +1,4 @@
-const CACHE_NAME = 'memo-v172';
+const CACHE_NAME = 'memo-v173';
 // 경로는 이 파일(sw.js) 자리 기준 — door9.github.io/projectpapers/ 에서도, 주소 맨 앞(/)에 둔 Cloudflare 에서도 같이 쓴다
 const ASSETS = [
   './',
@@ -44,6 +44,11 @@ self.addEventListener('activate', (e) => {
     )
   );
   self.clients.claim();
+});
+
+// 화면이 판 번호를 물으면 답한다 — 이미 그 판으로 열린 화면은 새 판이 깔렸다고 다시 열지 않는다(로딩이 두 번 뜨지 않게)
+self.addEventListener('message', (e) => {
+  if (e.data === 'version' && e.ports && e.ports[0]) e.ports[0].postMessage(CACHE_NAME);
 });
 
 self.addEventListener('fetch', (e) => {
