@@ -82,6 +82,7 @@ const isPermDeleted = (id) => deletedIds.some((d) => (d.id || d) === id);
 // 401 → 토큰 갱신 한 번, 429 → 잠깐 쉬고 다시. 409(충돌·없음)는 부른 쪽에서 본다.
 // 응답이 끝내 안 오면 제한 시간(init.timeout, 기본 30초) 뒤 실패로 본다 — 동기화 줄이 막히지 않게
 async function dbxFetch(url, init, attempt = 0, retried = false) {
+  await ensureToken();   // 접속 허가가 곧 끝나면 미리 새로 받는다(거절당하고 다시 오가지 않게)
   const res = await timedFetch(url, {
     method: 'POST',
     body: init.body,
@@ -142,8 +143,13 @@ async function splitList() {
   const cursor = store.getItem('split_cursor');
   let r = null;
   let full = false;
+  bootProgress('list');
   if (cursor) {
-    r = await dbxRpc('files/list_folder/continue', { cursor });
+    // 켜면서 미리 물어 둔 답(warmDropbox)이 있고 그사이 커서가 그대로면 그것을 쓴다(다른 창이 받아 커서가 바뀌었으면 새로 묻는다)
+    const early = earlyList && earlyList.cursor === cursor && Date.now() - earlyList.at < 10000 ? earlyList.promise : null;
+    earlyList = null;
+    if (early) r = await early.catch(() => null);
+    if (!r || (!r.ok && r.status !== 409)) r = await dbxRpc('files/list_folder/continue', { cursor });
     if (r.status === 409) r = null;
     else if (!r.ok) throw new Error('list failed: ' + r.status);
   }
@@ -202,6 +208,7 @@ async function unzipText(buf) {
 async function splitFetchFiles(keys, full) {
   const out = new Map();
   const want = new Set(keys);
+  bootProgress('get', 0, keys.length);
   if (full && keys.length > 20 && typeof DecompressionStream !== 'undefined') {
     try {
       const res = await dbxFetch('https://content.dropboxapi.com/2/files/download_zip', {
@@ -219,9 +226,11 @@ async function splitFetchFiles(keys, full) {
     }
   }
   const rest = keys.filter((k) => !out.has(k));
+  bootProgress('get', keys.length - rest.length, keys.length);
   for (let i = 0; i < rest.length; i += 4) {
     const part = await Promise.all(rest.slice(i, i + 4).map((k) => dbxGet(splitPath(k)).then((r) => [k, r])));
     for (const [k, r] of part) if (r) out.set(k, r);
+    bootProgress('get', keys.length - rest.length + Math.min(i + 4, rest.length), keys.length);
   }
   return out;
 }
@@ -439,6 +448,7 @@ async function splitPush(force, retried) {
 // 이미 옮겨져 있으면 전체를 받아(압축 파일 하나) 이 기기 내용과 합치고, 다른 것만 올린다.
 async function splitFirstSync() {
   setSyncStatus('syncing', '새 동기화 방식으로 맞추는 중...');
+  bootProgress('first');
   store.removeItem('split_cursor');
   saveSplitState({ revs: {}, base: {} });
   let L = await splitList();

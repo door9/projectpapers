@@ -1360,6 +1360,66 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
 }
 .btn-dropbox:hover { background: #004fd6; }
 
+/* 로딩 화면 — 켤 때·오래 가렸다 돌아올 때 Dropbox 에서 받기가 끝날 때까지 덮는다(app.js runBootGate).
+   html.booting = 머리 스크립트가 첫 그림부터 띄운 것, .on = 앱이 맡은 것, .veil = 돌아올 때 잠깐 안 보이게(누르기는 막음) */
+#boot {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: var(--bg);
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+html.booting #boot, #boot.on { display: flex; }
+html.booting #login-screen { display: none; }
+#boot.veil { background: transparent; }
+#boot.veil .boot-box { visibility: hidden; }
+#boot.closing { opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+.boot-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: min(240px, 76vw);
+}
+.boot-logo { width: 56px; height: 56px; }
+.boot-name {
+  font-family: 'Georgia', 'Times New Roman', serif;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.boot-bar {
+  width: 100%;
+  height: 6px;
+  margin-top: 8px;
+  border-radius: 3px;
+  background: var(--bg3);
+  overflow: hidden;
+}
+.boot-fill {
+  width: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent-fill);
+  transition: width 0.12s linear;
+}
+.boot-msg { min-height: 1.3em; font-size: 0.82rem; color: var(--text2); text-align: center; word-break: keep-all; }
+.boot-skip {
+  margin-top: 6px;
+  padding: 7px 14px;
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.82rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.boot-skip:hover { border-color: var(--accent); color: var(--accent); }
+
 /* Modal (delete confirm, folder input) */
 .modal-overlay {
   position: fixed;

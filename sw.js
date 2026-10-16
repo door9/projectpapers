@@ -1,4 +1,4 @@
-const CACHE_NAME = 'memo-v171';
+const CACHE_NAME = 'memo-v172';
 // 경로는 이 파일(sw.js) 자리 기준 — door9.github.io/projectpapers/ 에서도, 주소 맨 앞(/)에 둔 Cloudflare 에서도 같이 쓴다
 const ASSETS = [
   './',

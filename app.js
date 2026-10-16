@@ -10,7 +10,7 @@ const DBX_ROOT = '/projectpapers';
 // 글 단위 동기화(sync-split.js) — 2026-10-04 전환. 옛 한 파일 방식은 옮겨 올 때와 시험에서만 쓴다
 const SPLIT_SYNC = TEST_NS != null ? PAGE_PARAMS.get('split') === '1' : true;
 // 로그인과 화면 설정(어두운 화면·글자 크기)은 칸과 상관없이 하나 — 화면 설정은 index.html 머리에서 그리기 전에도 읽는다
-const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh', 'memo_theme', 'memo_font']);
+const SHARED_KEYS = new Set(['dbx_token', 'dbx_refresh', 'dbx_token_exp', 'memo_theme', 'memo_font']);
 // Dropbox 위치에 딸린 동기화 기록(받은 커서·파일 버전·기준점·못 보낸 변경)은 위치 이름을 붙여 따로 둔다.
 // 같은 주소의 기기 저장소를 함께 쓰는 다른 판이 다른 위치를 쓰더라도 기록이 섞이지 않게.
 // 새 위치에서는 기록이 비어 있어 처음 맞추기(받아서 합치고 다른 것만 올리기)부터 한다. 글·폴더 자체는 함께 쓴다
@@ -41,7 +41,7 @@ const store = {
 const MODE_QUERY = TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '171';
+const APP_VERSION = '172';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -375,11 +375,17 @@ async function init() {
   // 어두운 화면·글자 크기(index.html 머리에서 이미 입혔지만 같은 규칙으로 한 번 더)
   applyTheme();
   applyFont();
+  window.addEventListener('keydown', onBootKey, true);
 
+  // 목록 창이면 켤 때 로딩 화면(받기가 끝나 화면이 최신이 될 때까지). Ctrl+N 새 글 창·목록에서 연 글 창은 빼고
+  const popupWindow = PAGE_PARAMS.has('memo') || PAGE_PARAMS.get('new') === '1';
+  if (accessToken && !popupWindow) warmDropbox();   // 접속 허가·바뀐 것 묻기를 기기 자료 읽기와 함께 시작
   await handleOAuthCallback();
   assignLocalData(await openLocalData());   // IndexedDB 에서(처음이면 localStorage 에서 옮겨 와서)
   localLoaded = true;
   cleanupEmptyMemo();
+  if (accessToken && !popupWindow) runBootGate('start');
+  else document.documentElement.classList.remove('booting');
 
   // Cloudflare 잠금에 다시 로그인하고 돌아온 주소(?login=1)는 지운다
   if (PAGE_PARAMS.has('login')) {
@@ -448,12 +454,18 @@ async function init() {
     startWatch();
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') { flushSave(); stopWatch(); return; }
+    if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); flushSave(); stopWatch(); return; }
     // 돌아왔을 때: 새 버전이 나왔는지 보고(나왔으면 새 코드로 다시 연다),
     // 못 보낸 변경을 올리고 다른 기기에서 고친 것을 받아 온다(30초 안에 받았으면 생략)
+    const away = hiddenAt ? Date.now() - hiddenAt : 0;
+    if (away > 30000) staleMark = hiddenAt;   // 그동안 다른 기기 변경을 못 들었다 — 받기를 마쳐야 최신
+    hiddenAt = 0;
     checkForUpdate();
     if (!accessToken) return;
-    if (isDirty() || Date.now() - lastPullAt > 30000) syncFromDropbox();
+    // 1분 넘게 가려져 있었으면 받기가 끝날 때까지 로딩 화면, 그보다 짧으면 열려 있던 글만 받기가 끝날 때까지 못 고치게
+    if (away > BOOT_AWAY_MS) runBootGate('resume');
+    else if (currentId && needsFreshPull()) lockUntilPull(4000);
+    if (isDirty() || Date.now() - lastPullAt > 30000 || pullDoneAt <= staleMark) syncFromDropbox();
     startWatch();
     checkAutoBackup();   // 며칠 켜 둔 기기도 날이 바뀌면 그날 백업을 한다(오늘 했으면 바로 끝남)
   });
@@ -960,6 +972,7 @@ async function handleOAuthCallback() {
     accessToken = data.access_token;
     refreshToken = data.refresh_token || null;
     store.setItem('dbx_token', accessToken);
+    noteTokenExpiry(data);
     if (refreshToken) store.setItem('dbx_refresh', refreshToken);
     sessionStorage.removeItem('oauth_state');
     sessionStorage.removeItem('code_verifier');
@@ -991,6 +1004,7 @@ async function refreshAccessToken() {
     const data = await res.json();
     accessToken = data.access_token;
     store.setItem('dbx_token', accessToken);
+    noteTokenExpiry(data);
     return true;
   } catch (e) {
     // 통신이 잠깐 끊긴 것 — 로그아웃하지 않는다(예전엔 지하철 등에서 로그아웃되고 '(Offline Work)' 사본이 생겼다)
@@ -999,11 +1013,41 @@ async function refreshAccessToken() {
   }
 }
 
+// 접속 허가(약 4시간짜리)가 끝나는 때를 적어 두고, 곧 끝나면 미리 새로 받는다.
+// 예전엔 끝난 허가로 보냈다가 거절(401)당한 뒤에야 새로 받아, 한동안 안 켰다 켜면 Dropbox 를 두 번 더 오갔다
+function noteTokenExpiry(data) {
+  const sec = Number(data && data.expires_in);
+  // 끝나는 때를 모르면 지운다 — 남겨 두면 지난 때를 보고 요청마다 또 새로 받는다
+  if (sec > 0) store.setItem('dbx_token_exp', String(Date.now() + sec * 1000));
+  else store.removeItem('dbx_token_exp');
+}
+function tokenExpiresSoon() {
+  const exp = Number(store.getItem('dbx_token_exp')) || 0;
+  return exp > 0 && Date.now() > exp - 60000;
+}
+let tokenRefreshing = null;
+let tokenRetryAt = 0;   // 미리 새로 받기가 실패했으면 잠시 쉰다(그사이엔 예전처럼 거절당하면 받는다)
+function ensureToken() {
+  if (!accessToken || !refreshToken) return Promise.resolve();
+  // 같은 기기의 다른 창이 이미 새로 받아 두었으면 그것을 쓴다
+  const saved = store.getItem('dbx_token');
+  if (saved && saved !== accessToken && !tokenExpiresSoon()) accessToken = saved;
+  if (!tokenExpiresSoon() || Date.now() < tokenRetryAt) return Promise.resolve();
+  if (!tokenRefreshing) {
+    tokenRefreshing = refreshAccessToken()
+      .then((ok) => { if (!ok) tokenRetryAt = Date.now() + 30000; return ok; },
+        () => { tokenRetryAt = Date.now() + 30000; return false; })
+      .finally(() => { tokenRefreshing = null; });
+  }
+  return tokenRefreshing;
+}
+
 function logout() {
   accessToken = null;
   refreshToken = null;
   store.removeItem('dbx_token');
   store.removeItem('dbx_refresh');
+  store.removeItem('dbx_token_exp');
   waitLocalWrites(2000).then(() => location.reload());   // 기기 저장이 끝난 뒤(최대 2초)
 }
 
@@ -1628,6 +1672,23 @@ function refreshOpenMemo() {
 // push=false: 변경 알림으로 받기만 할 때 — 못 보낸 변경은 정해진 간격(손 뗀 뒤 3초, 지난 올리기 10초 뒤)대로 올린다.
 // 예전엔 내가 올린 것에도 알림이 와서 받고, 쓰는 중이면 곧바로 또 올리기를 되풀이해 글자 몇 개마다 올렸다
 let syncInFlight = null;
+let syncPhase = null;     // 'wait'(차례 기다림) | 'pull'(받는 중) | 'push'(받기를 마치고 올리는 중)
+let pullDoneAt = 0;       // 마지막으로 받기를 마친 시각 — '최신인가'는 시작 시각(lastPullAt)이 아니라 이것으로 가린다
+let pullWaiters = [];     // 받기가 끝나 화면이 최신이 되기를 기다리는 쪽(로딩 화면·글 잠금)
+function settlePullWaiters(err) {
+  const w = pullWaiters;
+  pullWaiters = [];
+  staleUntilPull = false;
+  w.forEach((x) => (err ? x.rej(err) : x.res()));
+}
+// 받기를 하고(받는 중이면 그것을, 올리는 중이면 끝난 뒤 새로) 받은 것이 화면에 들어오면 풀린다. 받다 실패하면 거절
+function pullFresh() {
+  if (!accessToken) return Promise.resolve();
+  const p = new Promise((res, rej) => pullWaiters.push({ res, rej }));
+  if (syncInFlight && syncPhase === 'push') syncInFlight.then(() => syncFromDropbox());
+  else syncFromDropbox();
+  return p;
+}
 function syncFromDropbox(opts = {}) {
   if (!accessToken || !syncLeader) return Promise.resolve();   // 주고받는 창은 같은 기기에서 하나
   const push = opts.push !== false;
@@ -1636,10 +1697,24 @@ function syncFromDropbox(opts = {}) {
     return syncInFlight.then(() => { if (isDirty()) return syncToDropboxIfDirty().catch(onSyncError); });
   }
   setSyncStatus('syncing', '동기화 중...');
+  syncPhase = 'wait';
   const run = queueSync(async () => {
     try {
       if (!syncLeader) { settleSyncStatus(); return; }   // 차례를 기다리는 사이 다른 창이 넘겨받았다
-      const remoteMissing = await pullAndMerge();
+      syncPhase = 'pull';
+      let remoteMissing;
+      try {
+        remoteMissing = await pullAndMerge();
+      } catch (e) {
+        settlePullWaiters(e);
+        throw e;
+      }
+      // 받은 것을 먼저 화면에 — 로딩 화면·글 잠금은 여기서 풀린다(올리기는 그 뒤 따로)
+      syncPhase = 'push';
+      pullDoneAt = Date.now();
+      renderAll();
+      refreshOpenMemo();
+      settlePullWaiters();
       // Dropbox 에 파일이 없는데 이 기기도 비어 있으면, 빈 파일을 만들지 않고 멈춘다.
       // (저장 경로가 어긋났을 때 빈 파일이 생겨 노트가 사라진 것처럼 보이는 사고 방지)
       if (remoteMissing && isLocalEmpty()) {
@@ -1658,7 +1733,7 @@ function syncFromDropbox(opts = {}) {
       onSyncError(e);
     }
   });
-  syncInFlight = run.finally(() => { syncInFlight = null; });
+  syncInFlight = run.finally(() => { syncInFlight = null; syncPhase = null; });
   return syncInFlight;
 }
 
@@ -3815,33 +3890,179 @@ function loadMemoInEditor(memo, opts = {}) {
   if (opts.query) revealQuery(opts.query);
   if (!accessToken) return;
   if (needsFreshPull()) {
-    // 받기 + 못 보낸 변경 올리기. 받는 동안은 잠깐 고치지 못하게(옛 내용 위에 쓰면 충돌본이 생긴다)
-    setFreshCheck(true);
-    const done = () => setFreshCheck(false);
-    Promise.race([syncFromDropbox(), dbxSleep(4000)]).then(done, done);
+    // 받기 + 못 보낸 변경 올리기. 받는 동안은 잠깐 고치지 못하게(옛 내용 위에 쓰면 충돌본이 생긴다).
+    // 로딩 화면을 건너뛰고 '이 기기 자료로 열기'로 들어왔으면 받기가 끝날 때까지
+    lockUntilPull(staleUntilPull ? 60000 : 4000);
   } else if (syncTimer || isDirty()) {
     // 글 전환 시 못 보낸 변경이 있으면 바로 보낸다
     syncToDropboxIfDirty().catch(onSyncError);
   }
 }
 
-// 다른 기기 변경을 받아 와야 하나 — 30초 안에 받았거나, Dropbox 변경 알림을 듣고 있으면(바뀌면 바로 받는다) 아니다
+// 다른 기기 변경을 받아 와야 하나 — 켠 뒤·오래 가렸다 돌아온 뒤 아직 받기를 마치지 못했으면 그렇다.
+// 그 밖엔 30초 안에 받기를 마쳤거나, Dropbox 변경 알림을 듣고 있으면(바뀌면 바로 받는다) 아니다.
+// 예전엔 받기를 '시작한' 시각으로 가려, 켜자마자 받는 동안 연 글과 돌아왔을 때 열려 있던 글이 잠기지 않았다 —
+// 그사이 다른 기기에서 고친 글에 치면 그쪽 내용이 '(충돌본)' 새 글로 빠졌다(2026-10-17 재현)
+let staleMark = Date.now();   // 이때부터 다른 기기 변경을 못 들었다(켤 때, 30초 넘게 가려졌다 돌아올 때 그 가려진 때)
+let hiddenAt = 0;             // 화면이 가려진 시각(돌아오면 0)
+let staleUntilPull = false;   // 로딩 화면을 건너뛰고 '이 기기 자료로 열기'로 들어왔다 — 받기가 끝날 때까지 글을 못 고친다
 function needsFreshPull() {
   if (!syncLeader) return false;   // 주고받는 창이 따로 있다 — 그 창이 받아 기기 저장으로 넘겨준다
-  if (Date.now() - lastPullAt < 30000) return false;
+  if (staleUntilPull || pullDoneAt <= staleMark) return true;
+  if (Date.now() - pullDoneAt < 30000) return false;
   return !(typeof watchIsLive === 'function' && watchIsLive());
 }
 
 let freshCheck = false;   // 글을 연 직후 최신 내용을 받는 중 — 그동안은 고치지 못한다
+let freshSeq = 0;
 function setFreshCheck(on) {
   freshCheck = on;
   applyEditable();
   updateSyncIndicator();
 }
+// 받기가 끝날 때까지(실패해도 끝) 열린 글을 못 고치게 — 늦어도 capMs 뒤엔 푼다. 나중에 건 잠금을 먼저 건 것이 풀지 않게
+function lockUntilPull(capMs) {
+  const my = ++freshSeq;
+  setFreshCheck(true);
+  const done = () => { if (my === freshSeq) setFreshCheck(false); };
+  Promise.race([pullFresh(), dbxSleep(capMs)]).then(done, done);
+}
 function applyEditable() {
-  const ro = viewerMode || freshCheck;
+  const ro = viewerMode || freshCheck || bootOn;
   editor.readOnly = ro;
   titleInput.readOnly = ro;
+}
+
+// ── 로딩 화면 (2026-10-17) ──
+// 앱을 켤 때, 그리고 1분 넘게 가려져 있다 돌아올 때 Dropbox 에서 바뀐 것을 받아 화면이 최신이 될 때까지 덮는다 —
+// 옛 목록·옛 글이 보였다가 바뀌거나, 옛 글 위에 쳐서 충돌본이 생기지 않게. 그동안은 누르기·치기를 막는다.
+// 게이지는 단계마다 가고 단계 안에서도 조금씩 차서 멈춰 보이지 않는다. 오프라인이면 그렇다고 알리고 바로 열고,
+// 8초 넘게 걸리면 '이 기기 자료로 열기'(그때는 받기가 끝날 때까지 글 고치기만 막는다).
+// Ctrl+N 새 글 창·목록에서 연 글 창은 켤 때 덮지 않는다(이미 최신인 목록 창에서 열린다)
+const BOOT_AWAY_MS = 60000;   // 이만큼 넘게 가려져 있다 돌아오면 덮는다
+const BOOT_SKIP_MS = 8000;    // 이만큼 걸리면 '이 기기 자료로 열기'
+const BOOT_VEIL_MS = 300;     // 돌아올 때는 이만큼 지나도 안 끝났을 때만 보인다(최신이면 번쩍이지 않게 — 누르기는 처음부터 막는다)
+let bootOn = false;
+let bootRun = 0;
+let bootPct = 0, bootGoal = 0, bootTimer = null, bootFirst = false;
+let bootFinal = false;   // 마지막 안내(오프라인·연결 못 함·최신)를 띄웠다 — 함께 돌던 받기의 진행 글귀가 덮어쓰지 않게
+
+function bootStage(msg, goal, final = false) {
+  if (!bootOn || (bootFinal && !final)) return;
+  if (final) bootFinal = true;
+  $('#boot-msg').textContent = msg;
+  bootGoal = Math.max(bootGoal, goal);
+}
+// 받는 단계마다(sync-split.js) — list: 바뀐 것 묻기, get: 받기 n/m, first: 이 기기에서 처음 맞추기
+function bootProgress(stage, n, m) {
+  if (!bootOn) return;
+  if (stage === 'first') { bootFirst = true; bootStage('처음 받는 중…', 40); }
+  else if (stage === 'list') bootStage(bootFirst ? '처음 받는 중…' : '바뀐 내용 확인 중…', 50);
+  else if (stage === 'get' && m) bootStage((bootFirst ? '처음 받는 중… ' : '바뀐 글 받는 중… ') + n + '/' + m, 55 + Math.round(40 * n / m));
+}
+// 목표까지 남은 거리의 일부씩 가고, 목표에 닿은 뒤에도 끝(96%)을 향해 아주 조금씩 — 한 단계가 오래 걸려도 멈춰 보이지 않게
+function bootPaint() {
+  if (bootPct < bootGoal) bootPct += Math.max((bootGoal - bootPct) * 0.18, 0.4);
+  else if (bootPct < 96) bootPct += (96 - bootPct) * 0.006;
+  $('#boot-fill').style.width = Math.min(bootPct, 100).toFixed(1) + '%';
+}
+
+async function runBootGate(kind) {
+  if (!accessToken || bootOn) return;
+  const run = ++bootRun;
+  const el = $('#boot');
+  const veil = kind === 'resume';
+  bootOn = true;
+  bootPct = 0; bootGoal = 0; bootFirst = false; bootFinal = false;
+  el.classList.remove('closing');
+  el.classList.toggle('veil', veil);
+  el.classList.add('on');
+  document.documentElement.classList.remove('booting');   // 머리 스크립트가 첫 그림에 띄운 것 — 이제 여기서 맡는다
+  $('#boot-fill').style.width = '0%';
+  $('#boot-skip').hidden = true;
+  // 고치던 칸에서 손을 뗀다(휴대폰 자판도 내려간다) — 받기가 끝나면 최신 내용에서 다시
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  applyEditable();
+  clearInterval(bootTimer);
+  bootTimer = setInterval(bootPaint, 80);
+  bootStage('Dropbox 연결 중…', 25);
+  const unveil = () => el.classList.remove('veil');
+  const veilTimer = veil ? setTimeout(unveil, BOOT_VEIL_MS) : null;
+  let skipTimer = null;
+  const skipped = new Promise((res) => {
+    skipTimer = setTimeout(() => {
+      unveil();
+      const b = $('#boot-skip');
+      b.hidden = false;
+      b.onclick = () => res('skip');
+    }, BOOT_SKIP_MS);
+  });
+  // 이 창이 Dropbox 와 주고받는 창이 못 되면(같은 기기의 다른 창이 맡고 있음) 3초 뒤 연다 — 그 창이 받아 넘겨준다
+  const notLeader = new Promise((res) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (run !== bootRun || syncLeader) { clearInterval(iv); return; }
+      if (Date.now() - t0 > 3000) { clearInterval(iv); res('other'); }
+    }, 100);
+  });
+  const outcome = !navigator.onLine ? 'offline'
+    : await Promise.race([pullFresh().then(() => 'done', () => 'fail'), skipped, notLeader]);
+  clearTimeout(veilTimer);
+  clearTimeout(skipTimer);
+  if (run !== bootRun) return;
+  if (outcome === 'offline' || outcome === 'fail') {
+    unveil();
+    bootStage(outcome === 'offline' ? '오프라인 · 이 기기 자료로 엽니다' : '연결하지 못했습니다 · 이 기기 자료로 엽니다', 100, true);
+    bootPct = 100;
+    bootPaint();
+    await dbxSleep(outcome === 'offline' ? 900 : 1400);
+  } else if (outcome === 'skip') {
+    staleUntilPull = true;   // 받기가 끝날 때까지 글 고치기만 막는다
+  } else if (outcome === 'done') {
+    // 다 찬 게이지는 걷히며 흐려지는 동안 보인다 — 쓰기는 기다리지 않고 바로 된다
+    bootStage('최신 상태입니다', 100, true);
+    bootPct = 100;
+    bootPaint();
+  }
+  if (run !== bootRun) return;
+  closeBoot();
+  if (outcome === 'skip' && currentId) lockUntilPull(60000);
+}
+
+function closeBoot() {
+  bootOn = false;
+  clearInterval(bootTimer);
+  bootTimer = null;
+  const el = $('#boot');
+  document.documentElement.classList.remove('booting');
+  if (el.classList.contains('veil')) el.classList.remove('on', 'veil');   // 보이기 전에 끝났다 — 그냥 걷는다
+  else {
+    el.classList.add('closing');
+    const run = bootRun;
+    setTimeout(() => { if (!bootOn && run === bootRun) el.classList.remove('on', 'closing'); }, 160);
+  }
+  applyEditable();
+}
+
+// 로딩 화면이 떠 있는 동안은 키를 앱에 넘기지 않는다(새로고침·창 닫기와 '이 기기 자료로 열기' 단추는 그대로)
+function onBootKey(e) {
+  if (!bootOn) return;
+  if (e.target && e.target.id === 'boot-skip') return;
+  e.stopImmediatePropagation();
+  const k = keyLetter(e);
+  if (e.key === 'F5' || e.key === 'Tab' || ((e.ctrlKey || e.metaKey) && (k === 'r' || k === 'w'))) return;
+  e.preventDefault();
+}
+
+// 켜자마자 Dropbox 쪽 준비를 기기 자료 읽기와 함께 시작한다 — 접속 허가가 끝났으면 새로 받고, 바뀐 것 목록도 미리 묻는다.
+// 첫 받기(splitList)는 그사이 커서가 그대로면 이 답을 쓴다
+let earlyList = null;   // { cursor, at, promise }
+function warmDropbox() {
+  const t = ensureToken();
+  const cursor = store.getItem('split_cursor');
+  if (!SPLIT_SYNC || store.getItem('split_ready') !== '1' || !cursor) return;
+  earlyList = { cursor, at: Date.now(), promise: t.then(() => dbxRpc('files/list_folder/continue', { cursor })) };
+  earlyList.promise.catch(() => {});   // 못 쓰면 첫 받기가 다시 묻는다
 }
 
 // 쓰던 자리(커서·스크롤) 기억 — 새 버전을 받아 저절로 다시 열릴 때 그 자리로

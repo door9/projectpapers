@@ -10,9 +10,19 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="stylesheet" href="style.css">
+  <!-- Dropbox 연결을 미리 열어 둔다(켤 때 첫 요청이 연결 맺기를 기다리지 않게) -->
+  <link rel="preconnect" href="https://api.dropboxapi.com" crossorigin>
+  <link rel="preconnect" href="https://content.dropboxapi.com" crossorigin>
   <script>
     // 화면 설정(어두운 화면·글자 크기)을 그리기 전에 입힌다 — app.js applyTheme·applyFont 와 같은 규칙
     try {
+      // Dropbox 에 로그인한 목록 창이면 처음부터 로딩 화면을 그린다(옛 목록이 먼저 보였다 바뀌지 않게) — app.js runBootGate 가 이어받는다.
+      // Ctrl+N 새 글 창·목록에서 연 글 창은 빼고. 15초 안에 이어받지 못하면(앱이 멈춤) 걷는다
+      var qs = location.search;
+      if ((localStorage.getItem('dbx_token') || /[?&]code=/.test(qs)) && !/[?&](memo|new)=/.test(qs)) {
+        document.documentElement.classList.add('booting');
+        setTimeout(function () { document.documentElement.classList.remove('booting'); }, 15000);
+      }
       var t = localStorage.getItem('memo_theme');
       var dark = t === 'dark' || (t === 'system' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
       document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
@@ -209,6 +219,17 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- 로딩 화면 — 켤 때·오래 가렸다 돌아올 때 Dropbox 에서 받기가 끝날 때까지 (app.js runBootGate) -->
+<div id="boot">
+  <div class="boot-box">
+    <img class="boot-logo" src="favicon.svg" alt="">
+    <div class="boot-name">Project Papers</div>
+    <div class="boot-bar"><div class="boot-fill" id="boot-fill"></div></div>
+    <div class="boot-msg" id="boot-msg" aria-live="polite">Dropbox 연결 중…</div>
+    <button class="boot-skip" id="boot-skip" type="button" hidden>이 기기 자료로 열기</button>
+  </div>
+</div>
 
 <script src="app.js"></script>
 <script src="sync-split.js"></script>
