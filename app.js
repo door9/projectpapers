@@ -41,7 +41,7 @@ const store = {
 const MODE_QUERY = TEST_NS ? '&ns=' + encodeURIComponent(TEST_NS) + (SPLIT_SYNC ? '&split=1' : '') : '';
 
 // 이 화면의 판 번호 — 도움말 맨 아래에 보인다(휴대폰이 옛 코드로 도는지 확인용). sw.js 의 CACHE_NAME 과 함께 올린다
-const APP_VERSION = '173';
+const APP_VERSION = '174';
 
 let storageFullAt = 0;
 function onStorageFull(e) {
@@ -376,6 +376,7 @@ async function init() {
   applyTheme();
   applyFont();
   window.addEventListener('keydown', onBootKey, true);
+  if ($('#boot')) $('#boot').addEventListener('click', onBootTap);
 
   // 목록 창이면 켤 때 로딩 화면(받기가 끝나 화면이 최신이 될 때까지). Ctrl+N 새 글 창·목록에서 연 글 창은 빼고
   const popupWindow = PAGE_PARAMS.has('memo') || PAGE_PARAMS.get('new') === '1';
@@ -3994,6 +3995,9 @@ async function runBootGate(kind) {
   const veilTimer = veil ? setTimeout(unveil, BOOT_VEIL_MS) : null;
   let skipTimer = null;
   const skipped = new Promise((res) => {
+    bootSkipNow = () => res('skip');
+    if (bootSkipEarly) res('skip');   // 앱이 맡기 전(머리 스크립트가 띄운 화면)에 이미 두 번 두드렸다
+    bootSkipEarly = false;
     skipTimer = setTimeout(() => {
       unveil();
       const b = $('#boot-skip');
@@ -4034,7 +4038,7 @@ async function runBootGate(kind) {
     bootStage(outcome === 'offline' ? '오프라인 · 이 기기 자료로 엽니다' : '연결하지 못했습니다 · 이 기기 자료로 엽니다', 100, true);
     bootPct = 100;
     bootPaint();
-    await dbxSleep(outcome === 'offline' ? 900 : 1400);
+    await Promise.race([dbxSleep(outcome === 'offline' ? 900 : 1400), skipped]);
   } else if (outcome === 'skip') {
     staleUntilPull = true;   // 받기가 끝날 때까지 글 고치기만 막는다
   } else if (outcome === 'done') {
@@ -4050,6 +4054,7 @@ async function runBootGate(kind) {
 
 function closeBoot() {
   bootOn = false;
+  bootSkipNow = null;
   clearInterval(bootTimer);
   bootTimer = null;
   const el = $('#boot');
@@ -4061,6 +4066,26 @@ function closeBoot() {
     setTimeout(() => { if (!bootOn && run === bootRun) el.classList.remove('on', 'closing'); }, 160);
   }
   applyEditable();
+}
+
+// 로딩 화면을 두 번 연달아 두드리면(PC 는 두 번 누르면) 곧장 연다 — 급할 때. '이 기기 자료로 열기'를 누른 것과 같아
+// 받기는 앱이 열린 채 이어지고, 끝날 때까지 다른 기기에서 고쳤을 수 있는 글만 못 고친다(새 글은 바로 쓴다).
+// 누르는 신호 중 마지막(click)에 열어야 덮개가 걷힌 뒤 손가락을 떼는 자리의 목록·단추가 눌리지 않는다
+const BOOT_TAP_MS = 400;   // 두 번 사이 이만큼 안이고
+const BOOT_TAP_PX = 40;    // 이만큼 안 떨어진 자리면 '두 번 두드림'
+let bootTapAt = 0, bootTapX = 0, bootTapY = 0;
+let bootSkipNow = null;      // 지금 떠 있는 로딩 화면을 건너뛴다(runBootGate 가 채운다)
+let bootSkipEarly = false;   // 앱이 로딩 화면을 맡기 전(머리 스크립트가 띄운 동안) 두 번 두드렸다
+function onBootTap(e) {
+  if (e.target.closest('#boot-skip')) return;
+  const now = Date.now();
+  const twice = now - bootTapAt < BOOT_TAP_MS && Math.abs(e.clientX - bootTapX) < BOOT_TAP_PX && Math.abs(e.clientY - bootTapY) < BOOT_TAP_PX;
+  bootTapAt = twice ? 0 : now;
+  bootTapX = e.clientX;
+  bootTapY = e.clientY;
+  if (!twice) return;
+  if (bootSkipNow) bootSkipNow();
+  else if (document.documentElement.classList.contains('booting')) bootSkipEarly = true;
 }
 
 // 로딩 화면이 떠 있는 동안은 키를 앱에 넘기지 않는다(새로고침·창 닫기와 '이 기기 자료로 열기' 단추는 그대로)

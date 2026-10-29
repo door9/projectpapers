@@ -1371,6 +1371,11 @@ body.toolbar-hidden #toolbar-reveal { display: flex; align-items: center; justif
   align-items: center;
   justify-content: center;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* 두 번 두드려 바로 열기(onBootTap) — 글자가 선택되거나 화면이 커지지 않게 */
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 html.booting #boot, #boot.on { display: flex; }
 html.booting #login-screen { display: none; }
